@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "condor-hopper"
+version = "0.1.0"
+description = "LCvx-guided 15 km KSP hopper controlled through kRPC"
+requires-python = ">=3.11"
+dependencies = [
+  "krpc>=0.5.4",
+  "numpy>=2.0",
+  "scipy>=1.14",
+  "cvxpy>=1.6",
+  "clarabel>=0.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "matplotlib>=3.9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["condor_hopper*"]

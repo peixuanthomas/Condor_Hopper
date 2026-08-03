@@ -1,0 +1,8 @@
+krpc>=0.5.4
+numpy>=2.0
+scipy>=1.14
+cvxpy>=1.6
+clarabel>=0.10
+matplotlib>=3.9
+pytest>=8.0
+
