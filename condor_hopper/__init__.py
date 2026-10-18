@@ -1,6 +1,1 @@
-"""Condor Hopper guidance, control, simulation, and kRPC integration."""
-
-from .models import FlightPhase, MissionConfig
-
-__all__ = ["FlightPhase", "MissionConfig"]
-
+"""Condor Hopper: 10000 米垂直起飞与指定地点着陆。"""

@@ -1,28 +1,47 @@
 # Condor Hopper
 
-`Condor_Hopper` controls the active KSP vessel through kRPC for a vertical 15 km hop, engine cutoff and ballistic coast through apogee, LCvx-guided relight, and return to the launch point.
+通过 Python 和 kRPC 控制 `Condor-Hopper`，全油门竖直上升到**海拔 10000 米**后熄火，滑行后降落到指定地点。
 
-## Commands
+着陆目标：**南纬 0°12′21″，西经 74°28′23″**（`-0.20583333, -74.47305556`）。程序从游戏读取该处地面海拔，分别记录目标离地高度和飞行器当前离地高度。
+
+## 飞行过程
+
+1. 记录起飞位置和指定着陆点。上升途中不减速，到指定海拔才关闭发动机，因此最高点会继续高于 10000 米。
+2. 滑行时保持方向，确认下降后展开栅格舵，在下降途中移动预计落点。
+3. 根据实际速度、质量、推力、耗油和星球自转，计算晚点火的着陆轨迹。点火前预测包含空气阻力，制动轨迹保守地不依赖轴向阻力，并计算侧向空气作用。不同点火时间和燃烧时长分别求解，选择可行轨迹。
+4. 点火后按当前高度跟随计划速度，扣除实际空气制动，连续调整方向。按偏差更新剩余轨迹，限制转向速度、倾角和燃料，禁止向上飞行或为追逐落点而悬停。
+5. 最后 200 米只减速、消除水平速度，不再根据位置偏差来回平移。第一条支腿接地就熄火并停止转向，至少三条支腿稳定一秒才确认着陆。
+
+通过条件：距指定着陆点不超过 3 米、升降速度不超过 1 米/秒、水平速度不超过 0.5 米/秒、倾斜不超过 3°。落点未对准也不会通过低空悬停追点；记录中会标明偏差。
+
+## 运行
+
+将飞行器重置到发射台，恢复燃料，收起栅格舵和支腿，开启 kRPC，保持游戏正常播放。
 
 ```powershell
+python -m pip install -r requirements.txt
 python main.py probe
-python main.py simulate --target-altitude 15000
-python main.py fly --target-altitude 15000 --execute
+python -m pytest
+python main.py fly --execute
 ```
 
-`probe` is read-only. `fly` refuses to stage or ignite unless `--execute` is present.
+`probe` 只读数据；`fly --execute` 执行一次飞行，失败后需要用户手动重置。默认熄火海拔为 10000 米，可用 `--target-altitude` 指定其他海拔。
 
-Flight and simulation artifacts are written below `flight_logs/YYYY-MM-DD_Condor_Hopper/`. Plot a telemetry file with:
+上升和滑行使用原有 kRPC 自动驾驶。下降由 Python 独立控制姿态，保持发动机端先行；控制计算使用各部件转动力的幅值，避开本机 kRPC 0.5.2 带符号相加的问题。栅格舵通过 `Extend Fins` 展开，启用俯仰、偏航，正向操纵限制为 100%，由 Python 限制转动速度并抵消持续的空气作用。
 
-```powershell
-python analyze_flight.py flight_logs\YYYY-MM-DD_Condor_Hopper\telemetry_HHMMSS.csv
-```
+轨迹使用 CVXPY 和 Clarabel 求解，求解在后台进行，不阻塞姿态控制。数学公式、论文来源和适用范围见 [LANDING.md](LANDING.md)。
 
-## Control architecture
+高度、速度和游戏时间通过 kRPC 数据流读取；起飞前先完成求解器初始化，避免首次求解影响飞行中的读取时间。
 
-- Three-degree-of-freedom LCvx/SOCP guidance with log mass, thrust-magnitude slack, thrust cone, glide-slope, fuel reserve, and terminal constraints.
-- CLARABEL trajectory solves with fixed-duration outer searches for ascent duration and landing ignition.
-- 20 Hz feed-forward plus position/velocity feedback tracking.
-- Ascent uses SAS stability assist by itself to suppress high-centre-of-mass wobble. At 15 km SAS is released before kRPC direction control follows LCvx descent vectors, so the two controllers never fight. RCS is enabled only after liftoff; grid fins are enabled through brakes only after confirmed descent; initially retracted legs deploy only for terminal landing.
+## 飞行记录
 
-The exact SpaceX flight software is not public. This project implements the public lossless-convexification/G-FOLD mathematical approach rather than claiming an exact proprietary reproduction.
+每次保存在 `flight_logs/时间/`，每条飞行数据立即写入磁盘：
+
+- `preflight.json`、`config.json`：载具、燃料、指定着陆点和熄火海拔。
+- `telemetry.csv`：高度、速度、位置偏差、姿态、油门、实际推力、转向输入、舵面、接地数量、轨迹编号及计划时间。
+- `plan_*.json`：每次采纳的轨迹，包括预计燃料、逐点位置、速度、推力加速度，以及重新计算的落地误差。
+- `summary.json`、`error.txt`：最终结果和失败原因。
+
+离线测试包含带转向延迟的下降模拟、燃料不足及无法返回的情况；不代替游戏内试飞。
+
+kRPC 参考：[飞行数据](https://krpc.github.io/krpc/latest/python/api/space-center/flight.html)、[自动驾驶](https://krpc.github.io/krpc/latest/python/api/space-center/auto-pilot.html)、[部件](https://krpc.github.io/krpc/latest/python/api/space-center/parts.html)。

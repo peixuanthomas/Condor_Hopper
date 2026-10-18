@@ -1,432 +1,219 @@
 from __future__ import annotations
 
 import math
-import time
-from typing import Any
 
 import numpy as np
 
-from .frames import create_launch_reference_frame, safe_read
-from .math3d import finite_vector
-from .models import ControlCommand, MissionConfig, NavigationState, VehicleModel
-
-
-def safe_float(reader, fallback: float = float("nan")) -> float:
-    try:
-        value = float(reader())
-    except Exception:
-        return fallback
-    return value if math.isfinite(value) else fallback
-
-
-def connect_krpc(config: MissionConfig):
-    import krpc
-
-    return krpc.connect(
-        name=config.client_name,
-        address=config.address,
-        rpc_port=config.rpc_port,
-        stream_port=config.stream_port,
-    )
+from .mission import Command, Sample, attitude_error, descent_attitude, unit
 
 
 class KrpcVehicle:
-    def __init__(self, connection: Any, config: MissionConfig) -> None:
-        self.connection = connection
-        self.config = config
-        self.space_center = connection.space_center
-        self.vessel = self.space_center.active_vessel
+    def __init__(self, connection):
+        self.sc = connection.space_center
+        self.vessel = self.sc.active_vessel
         self.body = self.vessel.orbit.body
+        self.frame = self.vessel.surface_reference_frame
+        self.flight = self.vessel.flight(self.frame)
         self.control = self.vessel.control
+        self.pilot = self.vessel.auto_pilot
         self.engines = list(self.vessel.parts.engines)
-        self.latitude_deg = safe_float(lambda: self.vessel.flight(self.body.reference_frame).latitude, 0.0)
-        self.longitude_deg = safe_float(lambda: self.vessel.flight(self.body.reference_frame).longitude, 0.0)
-        self.reference_frame = create_launch_reference_frame(
-            self.space_center, self.body, self.latitude_deg, self.longitude_deg
-        )
-        self.flight = self.vessel.flight(self.reference_frame)
-        self._last_resource_fraction = 1.0
-        self._direction_control_engaged = False
-        self._sas_stability_enabled = False
+        self.legs = list(self.vessel.parts.legs)
+        self.fins = [s for s in self.vessel.parts.control_surfaces if "grid fin" in s.part.name.lower()]
+        self.fin_modules = [m for s in self.fins for m in s.part.modules if m.name == "ModuleAnimateGeneric"]
+        self.launch_latitude = self.flight.latitude
+        self.launch_longitude = self.flight.longitude
+        self.touchdown_height = self.flight.surface_altitude
+        self.target_latitude = -(12.0 / 60.0 + 21.0 / 3600.0)
+        self.target_longitude = -(74.0 + 28.0 / 60.0 + 23.0 / 3600.0)
+        self.target_terrain_altitude = self.body.surface_height(self.target_latitude, self.target_longitude)
+        self.target_body_position = np.array(self.body.position_at_altitude(
+            self.target_latitude, self.target_longitude,
+            self.target_terrain_altitude + self.touchdown_height, self.body.reference_frame))
+        self.part_count = len(self.vessel.parts.all)
+        self.mu = self.body.gravitational_parameter
+        self.radius = self.body.equatorial_radius
+        self.fins_deployed = False
+        self.legs_deployed = False
+        self.engine_active = bool(self.engines and self.engines[0].active)
+        self.last_direction = np.array([1.0, 0.0, 0.0])
+        self.last_ut = None
+        self.velocity_check_state = None
+        self.attitude_active = False
+        self.manual_descent = False
+        self.angular_accel = np.ones(3)
+        self.attitude_bias = np.zeros(3)
+        self.last_torque_update = float("-inf")
+        self.max_thrust = sum(e.max_thrust * e.thrust_limit for e in self.engines)
+        self.streams = dict(
+            ut=connection.add_stream(getattr, self.sc, "ut"),
+            altitude=connection.add_stream(getattr, self.flight, "mean_altitude"),
+            surface_altitude=connection.add_stream(getattr, self.flight, "surface_altitude"),
+            mass=connection.add_stream(getattr, self.vessel, "mass"),
+            velocity=connection.add_stream(self.vessel.velocity, self.body.reference_frame),
+            position=connection.add_stream(self.vessel.position, self.body.reference_frame),
+            direction=connection.add_stream(self.vessel.direction, self.frame),
+            aero=connection.add_stream(getattr, self.flight, "aerodynamic_force"))
+        for stream in self.streams.values():
+            stream.rate = 50.0
+            stream.start()
 
-    def rebuild_launch_frame(self, latitude_deg: float, longitude_deg: float) -> None:
-        self.latitude_deg = latitude_deg
-        self.longitude_deg = longitude_deg
-        self.reference_frame = create_launch_reference_frame(
-            self.space_center, self.body, latitude_deg, longitude_deg
-        )
-        self.flight = self.vessel.flight(self.reference_frame)
-        self._direction_control_engaged = False
-        self._sas_stability_enabled = False
+    def snapshot(self):
+        state = self.read()
+        return dict(name=self.vessel.name, situation=str(self.vessel.situation),
+                    latitude=self.launch_latitude, longitude=self.launch_longitude,
+                    target_latitude=self.target_latitude, target_longitude=self.target_longitude,
+                    target_surface_altitude_m=self.target_terrain_altitude,
+                    distance_to_target_m=float(np.linalg.norm(state.error)),
+                    altitude_m=state.altitude_m, surface_altitude_m=self.flight.surface_altitude,
+                    mass_kg=state.mass_kg, dry_mass_kg=self.vessel.dry_mass,
+                    speed_ms=float(np.linalg.norm(state.velocity)), direction=state.direction.tolist(),
+                    parts=self.part_count, engines=len(self.engines), grid_fins=len(self.fins), legs=len(self.legs),
+                    restartable=all(e.can_restart for e in self.engines),
+                    legs_retracted=all(not leg.deployed for leg in self.legs),
+                    fins_retracted=all("Extend Fins" in m.events for m in self.fin_modules),
+                    max_thrust_n=self.max_thrust,
+                    exhaust_velocity_ms=self.engines[0].specific_impulse * 9.80665,
+                    body_radius_m=self.radius,
+                    rotation_up_north_east=(self.body.rotational_speed * np.array([
+                        math.sin(math.radians(self.launch_latitude)), math.cos(math.radians(self.launch_latitude)), 0.0])).tolist(),
+                    resources=[dict(name=r.name, amount=r.amount, capacity=r.max) for r in self.vessel.resources.all])
 
-    def static_snapshot(self) -> dict[str, Any]:
-        grid_fins = [surface for surface in self.vessel.parts.control_surfaces if "grid fin" in surface.part.name.lower()]
-        legs = list(self.vessel.parts.legs)
-        rcs = list(self.vessel.parts.rcs)
-        resources = []
-        for resource in safe_read(lambda: list(self.vessel.resources.all), []):
-            resources.append(
-                {
-                    "name": safe_read(lambda r=resource: r.name, ""),
-                    "amount": safe_float(lambda r=resource: r.amount, 0.0),
-                    "max": safe_float(lambda r=resource: r.max, 0.0),
-                    "enabled": safe_read(lambda r=resource: r.enabled, None),
-                }
-            )
-        engines = []
-        for engine in self.engines:
-            engines.append(
-                {
-                    "part": safe_read(lambda e=engine: e.part.name, ""),
-                    "title": safe_read(lambda e=engine: e.part.title, ""),
-                    "stage": safe_read(lambda e=engine: e.part.stage, -1),
-                    "active": safe_read(lambda e=engine: e.active, False),
-                    "can_restart": safe_read(lambda e=engine: e.can_restart, False),
-                    "available_thrust_n": safe_float(lambda e=engine: e.available_thrust, 0.0),
-                    "max_thrust_n": safe_float(lambda e=engine: e.max_thrust, 0.0),
-                    "specific_impulse_s": safe_float(lambda e=engine: e.specific_impulse, 0.0),
-                    "gimbal_range_deg": safe_float(lambda e=engine: e.gimbal_range, 0.0),
-                    "propellants": list(safe_read(lambda e=engine: e.propellants, [])),
-                }
-            )
-        return {
-            "server_version": safe_read(lambda: self.connection.krpc.get_status().version, "unknown"),
-            "vessel": {
-                "name": safe_read(lambda: self.vessel.name, ""),
-                "situation": str(safe_read(lambda: self.vessel.situation, "")),
-                "mass_kg": safe_float(lambda: self.vessel.mass, 0.0),
-                "dry_mass_kg": safe_float(lambda: self.vessel.dry_mass, 0.0),
-                "current_stage": safe_read(lambda: self.control.current_stage, -1),
-                "position_local_m": safe_read(lambda: self.vessel.position(self.reference_frame), ()),
-                "direction_local": safe_read(lambda: self.vessel.direction(self.reference_frame), ()),
-            },
-            "control": {
-                "throttle": safe_float(lambda: self.control.throttle, 0.0),
-                "rcs": safe_read(lambda: self.control.rcs, False),
-                "brakes": safe_read(lambda: self.control.brakes, False),
-                "gear": safe_read(lambda: self.control.gear, False),
-                "legs": safe_read(lambda: self.control.legs, False),
-            },
-            "engines": engines,
-            "counts": {
-                "engines": len(self.engines),
-                "rcs": len(rcs),
-                "grid_fins": len(grid_fins),
-                "legs": len(legs),
-            },
-            "rcs": [
-                {
-                    "part": safe_read(lambda unit=unit: unit.part.name, ""),
-                    "enabled": safe_read(lambda unit=unit: unit.enabled, False),
-                    "max_thrust_n": safe_float(lambda unit=unit: unit.max_thrust, 0.0),
-                    "propellants": list(safe_read(lambda unit=unit: unit.propellants, [])),
-                }
-                for unit in rcs
-            ],
-            "grid_fins": [
-                {
-                    "part": safe_read(lambda surface=surface: surface.part.name, ""),
-                    "authority": safe_float(lambda surface=surface: surface.authority_limiter, 0.0),
-                    "pitch": safe_read(lambda surface=surface: surface.pitch_enabled, False),
-                    "yaw": safe_read(lambda surface=surface: surface.yaw_enabled, False),
-                    "roll": safe_read(lambda surface=surface: surface.roll_enabled, False),
-                }
-                for surface in grid_fins
-            ],
-            "legs": [
-                {
-                    "part": safe_read(lambda leg=leg: leg.part.name, ""),
-                    "deployed": safe_read(lambda leg=leg: leg.deployed, False),
-                    "grounded": safe_read(lambda leg=leg: leg.is_grounded, False),
-                    "state": str(safe_read(lambda leg=leg: leg.state, "")),
-                }
-                for leg in legs
-            ],
-            "resources": resources,
-        }
+    def validate(self, cutoff_altitude):
+        snapshot = self.snapshot()
+        situation = snapshot["situation"].lower()
+        if "pre_launch" not in situation and "landed" not in situation:
+            raise RuntimeError("飞行器不在地面，请准备好试飞")
+        if (snapshot["engines"], snapshot["grid_fins"], snapshot["legs"]) != (1, 4, 4):
+            raise RuntimeError("当前飞行器应有一台发动机、四片栅格舵和四条支腿")
+        if not snapshot["restartable"] or self.max_thrust <= 1.2 * self.vessel.mass * self.body.surface_gravity:
+            raise RuntimeError("发动机不能重新点火，或起飞推力不足")
+        if len(self.fin_modules) != 4 or not snapshot["fins_retracted"] or not snapshot["legs_retracted"]:
+            raise RuntimeError("请先收起四片栅格舵和四条支腿")
+        if snapshot["speed_ms"] > 0.5 or snapshot["direction"][0] < math.cos(math.radians(3.0)):
+            raise RuntimeError("飞行器尚未静止竖直放好，请准备好试飞")
+        if snapshot["altitude_m"] >= cutoff_altitude:
+            raise RuntimeError("起飞海拔已经达到熄火高度")
+        return snapshot
 
-    def vehicle_model(self) -> VehicleModel:
-        max_thrust = sum(safe_float(lambda e=engine: e.max_thrust, 0.0) for engine in self.engines)
-        available = sum(safe_float(lambda e=engine: e.available_thrust, 0.0) for engine in self.engines)
-        max_thrust = max(max_thrust, available)
-        isp_values = [safe_float(lambda e=engine: e.specific_impulse, 0.0) for engine in self.engines]
-        isp = max(isp_values or [0.0])
-        grid_count = sum(1 for surface in self.vessel.parts.control_surfaces if "grid fin" in surface.part.name.lower())
-        return VehicleModel(
-            name=str(safe_read(lambda: self.vessel.name, "")),
-            wet_mass_kg=safe_float(lambda: self.vessel.mass, 0.0),
-            dry_mass_kg=safe_float(lambda: self.vessel.dry_mass, 0.0),
-            current_mass_kg=safe_float(lambda: self.vessel.mass, 0.0),
-            max_thrust_n=max_thrust,
-            specific_impulse_s=isp,
-            engine_count=len(self.engines),
-            rcs_count=len(self.vessel.parts.rcs),
-            grid_fin_count=grid_count,
-            leg_count=len(self.vessel.parts.legs),
-            engine_restartable=all(safe_read(lambda e=engine: e.can_restart, False) for engine in self.engines),
-            engine_gimbal_deg=max([safe_float(lambda e=engine: e.gimbal_range, 0.0) for engine in self.engines] or [0.0]),
-        )
-
-    def read_state(self) -> NavigationState:
-        mass = safe_float(lambda: self.vessel.mass, 1.0)
-        aerodynamic_force = finite_vector(
-            safe_read(lambda: self.flight.aerodynamic_force, (0.0, 0.0, 0.0))
-        )
-        available_thrust = safe_float(lambda: self.vessel.available_thrust, 0.0)
-        if available_thrust <= 1.0:
-            available_thrust = sum(safe_float(lambda e=engine: e.available_thrust, 0.0) for engine in self.engines)
-        isp = safe_float(lambda: self.vessel.specific_impulse, 0.0)
-        if isp <= 1.0:
-            isp = max([safe_float(lambda e=engine: e.specific_impulse, 0.0) for engine in self.engines] or [1.0])
-        legs_grounded = sum(bool(safe_read(lambda leg=leg: leg.is_grounded, False)) for leg in self.vessel.parts.legs)
-        resource_fraction = self.resource_fraction()
-        return NavigationState(
-            ut=safe_float(lambda: self.space_center.ut, 0.0),
-            monotonic_s=time.monotonic(),
-            position_m=finite_vector(safe_read(lambda: self.vessel.position(self.reference_frame), ())),
-            velocity_ms=finite_vector(safe_read(lambda: self.vessel.velocity(self.reference_frame), ())),
-            direction=finite_vector(safe_read(lambda: self.vessel.direction(self.reference_frame), (1.0, 0.0, 0.0))),
-            vessel_up=finite_vector(
-                safe_read(
-                    lambda: self.space_center.transform_direction(
-                        (0.0, 0.0, 1.0), self.vessel.reference_frame, self.reference_frame
-                    ),
-                    (0.0, 1.0, 0.0),
-                )
-            ),
-            angular_velocity_rads=-finite_vector(
-                safe_read(lambda: self.vessel.angular_velocity(self.reference_frame), (0.0, 0.0, 0.0))
-            ),
-            mass_kg=mass,
-            available_thrust_n=available_thrust,
-            specific_impulse_s=isp,
-            aerodynamic_accel_ms2=aerodynamic_force / max(mass, 1.0),
-            pitch_deg=safe_float(lambda: self.flight.pitch, float("nan")),
-            heading_deg=safe_float(lambda: self.flight.heading, float("nan")),
-            roll_deg=safe_float(lambda: self.flight.roll, float("nan")),
-            situation=str(safe_read(lambda: self.vessel.situation, "")),
-            legs_grounded=legs_grounded,
-            resource_fraction=resource_fraction,
-        )
-
-    def resource_fraction(self) -> float:
-        amounts = 0.0
-        maxima = 0.0
-        for name in ("LqdMethane", "Oxidizer"):
-            amounts += safe_float(lambda n=name: self.vessel.resources.amount(n), 0.0)
-            maxima += safe_float(lambda n=name: self.vessel.resources.max(n), 0.0)
-        if maxima > 0.0:
-            self._last_resource_fraction = amounts / maxima
-        return self._last_resource_fraction
-
-    def current_thrust(self) -> float:
-        return safe_float(lambda: self.vessel.thrust, 0.0)
-
-    def legs_retracted_count(self) -> int:
-        count = 0
-        for leg in self.vessel.parts.legs:
-            state = str(safe_read(lambda current=leg: current.state, "")).lower()
-            if "retracted" in state:
-                count += 1
-        return count
-
-    def available_angular_acceleration(self) -> np.ndarray:
-        torque = np.zeros(3)
-        for name in (
-            "available_reaction_wheel_torque",
-            "available_rcs_torque",
-            "available_engine_torque",
-            "available_control_surface_torque",
-        ):
-            pair = safe_read(lambda n=name: getattr(self.vessel, n), None)
-            if pair is None:
-                continue
-            try:
-                positive = np.abs(np.asarray(pair[0], dtype=float))
-                negative = np.abs(np.asarray(pair[1], dtype=float))
-                torque += np.maximum(positive, negative)
-            except Exception:
-                continue
-        inertia = finite_vector(safe_read(lambda: self.vessel.moment_of_inertia, (1.0, 1.0, 1.0)), (1.0, 1.0, 1.0))
-        acceleration = torque / np.maximum(inertia, 1.0)
-        return np.maximum(np.array([acceleration[1], acceleration[2], acceleration[0]]), 0.05)
-
-    def prepare_controls(self) -> None:
+    def prepare(self):
         self.control.throttle = 0.0
-        self.set_rcs(False)
-        self.set_grid_fins(False)
-        self.set_legs(False)
-        for name in ("pitch", "yaw", "roll", "forward", "up", "right"):
-            try:
-                setattr(self.control, name, 0.0)
-            except Exception:
-                pass
-        try:
-            self.control.sas = False
-            self._sas_stability_enabled = False
-        except Exception:
-            pass
-        try:
-            self.vessel.auto_pilot.disengage()
-            self._direction_control_engaged = False
-        except Exception:
-            pass
-        try:
-            self.space_center.rails_warp_factor = 0
-            self.space_center.physics_warp_factor = 0
-        except Exception:
-            pass
+        self.control.sas = False
+        self.control.rcs = False
+        for fin in self.fins:
+            fin.pitch_enabled = True
+            fin.yaw_enabled = True
+            fin.roll_enabled = False
+            fin.authority_limiter = 100.0
+        self.pilot.reference_frame = self.frame
+        self.pilot.target_direction = (1.0, 0.0, 0.0)
+        self.pilot.target_roll = float("nan")
+        self.pilot.stopping_time = (1.0, 1.0, 1.0)
+        self.pilot.deceleration_time = (3.0, 3.0, 3.0)
+        self.pilot.auto_tune = True
+        self.pilot.engage()
+        self.attitude_active = True
 
-    def engage_direction_control(self, target_direction: np.ndarray | tuple[float, float, float]) -> None:
-        """Let KSP's attitude autopilot close the body-axis loop.
+    def read(self):
+        if self.sc.active_vessel != self.vessel or len(self.vessel.parts.all) != self.part_count:
+            raise RuntimeError("飞行器已切换或部件损坏，停止本次试飞")
+        # 时间和高度连续读取缓存，避免后台求解耗时被误算成高度采样时间。
+        ut, altitude = self.streams["ut"](), self.streams["altitude"]()
+        mass = self.streams["mass"]()
+        if mass <= 0.0:
+            raise RuntimeError("载具已损坏或消失，请手动重置飞行器")
+        # surface_reference_frame 跟随载具移动，在其中直接读取载具速度会得到零。
+        ground_velocity = self.streams["velocity"]()
+        velocity = np.array(self.sc.transform_direction(ground_velocity, self.body.reference_frame, self.frame))
+        offset = self.target_body_position - np.array(self.streams["position"]())
+        error = np.array(self.sc.transform_direction(tuple(offset), self.body.reference_frame, self.frame))[1:]
+        if self.legs_deployed:
+            self.touchdown_height = max(-leg.part.bounding_box(self.frame)[0][0] for leg in self.legs) + 0.5
+        state = Sample(ut=ut, altitude_m=altitude,
+                       height_m=self.streams["surface_altitude"]() - self.touchdown_height,
+                       target_height_m=altitude - self.target_terrain_altitude - self.touchdown_height,
+                       velocity=velocity, error=error, direction=np.array(self.streams["direction"]()),
+                       aero=np.array(self.streams["aero"]()) / mass, mass_kg=mass,
+                       thrust_n=sum(e.max_thrust * e.thrust_limit for e in self.engines),
+                       gravity=self.mu / (self.radius + altitude)**2,
+                       grounded=sum(leg.is_grounded for leg in self.legs))
+        if not np.all(np.isfinite([state.ut, altitude, state.height_m, mass, state.thrust_n,
+                                   *velocity, *error, *state.direction, *state.aero])):
+            raise RuntimeError("kRPC 飞行数据异常，请准备好试飞")
+        previous = self.velocity_check_state
+        if previous is None or state.ut - previous.ut >= 0.5:
+            if previous is not None:
+                measured_speed = (altitude - previous.altitude_m) / (state.ut - previous.ut)
+                reported_speed = (velocity[0] + previous.velocity[0]) / 2.0
+                if abs(measured_speed - reported_speed) > max(20.0, 0.3 * abs(measured_speed)):
+                    raise RuntimeError(f"高度变化与升降速度不符：高度变化 {measured_speed:.1f}m/s，"
+                                       f"速度读数 {reported_speed:.1f}m/s，间隔 {state.ut - previous.ut:.3f}s")
+            self.velocity_check_state = state
+        return state
 
-        LCvx and the feedback layer still choose the thrust vector.  Delegating
-        only the inner attitude loop avoids depending on craft-specific manual
-        pitch/yaw signs while RCS, gimbal, reaction wheels and grid fins remain
-        available to KSP's actuator controller.
-        """
-        direction = finite_vector(target_direction, (1.0, 0.0, 0.0))
-        direction /= max(float(np.linalg.norm(direction)), 1e-12)
-        autopilot = self.vessel.auto_pilot
-        autopilot.reference_frame = self.reference_frame
-        autopilot.target_direction = tuple(float(value) for value in direction)
-        try:
-            autopilot.target_roll = 0.0
-        except Exception:
-            pass
-        if not self._direction_control_engaged:
-            try:
-                self.control.sas = False
-                self._sas_stability_enabled = False
-            except Exception:
-                pass
-            autopilot.engage()
-            self._direction_control_engaged = True
-
-    def disengage_direction_control(self) -> None:
-        if not self._direction_control_engaged:
+    def apply(self, command: Command, state: Sample):
+        if command.fins and not self.fins_deployed:
+            for module in self.fin_modules:
+                module.trigger_event("Extend Fins")
+            self.fins_deployed = True
+            self.pilot.disengage()
+            self.attitude_active = False
+            self.manual_descent = True
+        if command.legs and not self.legs_deployed:
+            self.control.legs = True
+            self.legs_deployed = True
+        if command.engine != self.engine_active:
+            self.control.throttle = 0.0
+            for engine in self.engines:
+                engine.active = command.engine
+            self.engine_active = command.engine
+            self.attitude_bias[:] = 0.0
+        if not command.hold_attitude:
+            self.control.throttle = 0.0
+            if self.attitude_active:
+                self.pilot.disengage()
+                self.attitude_active = False
+            self.control.pitch = self.control.yaw = self.control.roll = 0.0
+            self.control.rcs = False
             return
-        try:
-            self.vessel.auto_pilot.disengage()
-        finally:
-            self._direction_control_engaged = False
-
-    def set_sas_stability(self, enabled: bool) -> None:
-        """Enable SAS stability assist without competing attitude controllers."""
-        enabled = bool(enabled)
-        if enabled == self._sas_stability_enabled:
-            return
-        if enabled:
-            self.disengage_direction_control()
-        try:
-            self.control.sas = enabled
-            if enabled:
-                self.control.sas_mode = self.space_center.SASMode.stability_assist
-            self._sas_stability_enabled = enabled
-        except Exception:
-            if enabled:
-                raise
-
-    def ignite_initial(self, initial_throttle: float) -> None:
-        self.control.throttle = max(0.0, min(1.0, initial_throttle))
-        if not any(bool(safe_read(lambda e=engine: e.active, False)) for engine in self.engines):
-            self.control.activate_next_stage()
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if any(bool(safe_read(lambda e=engine: e.active, False)) for engine in self.engines):
-                return
-            time.sleep(0.05)
-        raise RuntimeError("engine did not activate after staging")
-
-    def relight(self) -> None:
-        for engine in self.engines:
-            try:
-                engine.active = True
-            except Exception:
-                pass
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if any(bool(safe_read(lambda e=engine: e.active, False)) for engine in self.engines):
-                return
-            time.sleep(0.05)
-        raise RuntimeError("engine relight failed")
-
-    def shutdown_engines(self) -> None:
-        self.control.throttle = 0.0
-        for engine in self.engines:
-            try:
-                engine.active = False
-            except Exception:
-                pass
-
-    def set_rcs(self, enabled: bool) -> None:
-        self.control.rcs = bool(enabled)
-
-    def set_grid_fins(self, deployed: bool) -> None:
-        self.control.brakes = bool(deployed)
-
-    def set_legs(self, deployed: bool) -> None:
-        for name in ("gear", "legs"):
-            try:
-                setattr(self.control, name, bool(deployed))
-            except Exception:
-                pass
-
-    def apply_command(self, command: ControlCommand) -> None:
-        self.control.throttle = max(0.0, min(1.0, float(command.throttle)))
-        if command.sas_stability:
-            self.set_sas_stability(True)
-        elif command.direction_control:
-            self.set_sas_stability(False)
-            self.engage_direction_control(command.target_direction)
+        if state.height_m > 1.0 and not self.control.rcs:
+            self.control.rcs = True
+        dt = 0.05 if self.last_ut is None else max(0.0, state.ut - self.last_ut)
+        self.last_ut = state.ut
+        angle = math.acos(float(np.clip(np.dot(self.last_direction, command.direction), -1.0, 1.0)))
+        fraction = min(1.0, math.radians(5.0) * dt / max(angle, 1e-9))
+        old_direction = self.last_direction.copy()
+        self.last_direction = unit((1.0 - fraction) * self.last_direction + fraction * command.direction)
+        if self.manual_descent:
+            if state.ut - self.last_torque_update >= 0.25:
+                torque = np.zeros(3)
+                # 本机服务端的舵面转动力带正负号，先取幅值再相加，避免互相抵消。
+                sources = [self.vessel.available_reaction_wheel_torque, self.vessel.available_rcs_torque,
+                           self.vessel.available_engine_torque, *[fin.available_torque for fin in self.fins]]
+                for positive, negative in sources:
+                    torque += np.maximum(np.abs(positive), np.abs(negative))
+                self.angular_accel = torque / np.asarray(self.vessel.moment_of_inertia)
+                self.last_torque_update = state.ut
+            local_target = self.sc.transform_direction(tuple(self.last_direction), self.frame, self.vessel.reference_frame)
+            angular_velocity = self.vessel.angular_velocity(self.body.reference_frame)
+            rate = -np.array(self.sc.transform_direction(angular_velocity, self.body.reference_frame, self.vessel.reference_frame))
+            requested_rate = -np.cross(old_direction, self.last_direction) / max(dt, 0.02)
+            requested_rate = np.array(self.sc.transform_direction(tuple(requested_rate), self.frame, self.vessel.reference_frame))
+            command_input = descent_attitude(local_target, rate, self.angular_accel, self.attitude_bias, requested_rate)
+            error = attitude_error(local_target)
+            correcting = (np.abs(command_input) < 0.99) | (command_input * error < 0.0)
+            # 抵消持续把机体推回迎风方向的空气作用，避免有偏角却一直转不过去。
+            self.attitude_bias = np.clip(self.attitude_bias + 0.3 * dt * error * correcting, -0.8, 0.8)
+            self.attitude_bias[1] = 0.0
+            pitch, roll, yaw = command_input
+            self.control.pitch, self.control.roll, self.control.yaw = float(pitch), float(roll), float(yaw)
         else:
-            self.set_sas_stability(False)
-            self.disengage_direction_control()
-        self.control.roll = 0.0
-        self.control.yaw = 0.0
-        self.control.pitch = 0.0
-        self.set_rcs(command.rcs)
-        self.set_grid_fins(command.brakes)
-        self.set_legs(command.legs)
+            self.pilot.target_direction = tuple(self.last_direction)
+        self.control.throttle = command.throttle
 
-    def secure_after_flight(self, landed: bool, deploy_legs: bool | None = None) -> None:
+    def stop(self):
         self.control.throttle = 0.0
-        for name in ("pitch", "yaw", "roll", "forward", "up", "right"):
-            try:
-                setattr(self.control, name, 0.0)
-            except Exception:
-                pass
-        self.set_rcs(False)
-        self.set_grid_fins(False)
-        self.set_legs(landed if deploy_legs is None else deploy_legs)
-        self.disengage_direction_control()
-        try:
-            self.control.sas = False
-            self._sas_stability_enabled = False
-        except Exception:
-            pass
-        if landed:
-            self.shutdown_engines()
-
-
-def validate_snapshot(snapshot: dict[str, Any], model: VehicleModel, config: MissionConfig) -> list[str]:
-    failures: list[str] = []
-    if model.name != config.vessel_name:
-        failures.append(f"expected vessel {config.vessel_name!r}, got {model.name!r}")
-    expected = {
-        "engines": config.expected_engines,
-        "rcs": config.expected_rcs,
-        "grid_fins": config.expected_grid_fins,
-        "legs": config.expected_legs,
-    }
-    for key, count in expected.items():
-        actual = int(snapshot.get("counts", {}).get(key, -1))
-        if actual != count:
-            failures.append(f"expected {count} {key}, got {actual}")
-    if not model.engine_restartable:
-        failures.append("main engine is not restartable")
-    if model.sea_level_twr < 1.2:
-        failures.append(f"initial TWR {model.sea_level_twr:.2f} is below 1.20")
-    if model.current_mass_kg <= model.dry_mass_kg:
-        failures.append("no usable propellant mass detected")
-    return failures
+        for engine in self.engines:
+            engine.active = False
+        self.pilot.disengage()
+        self.control.pitch = self.control.yaw = self.control.roll = 0.0
+        self.control.rcs = False

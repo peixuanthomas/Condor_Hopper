@@ -3,13 +3,16 @@ import pytest
 import main
 
 
-def test_live_flight_requires_explicit_execute_flag():
-    args = main.build_parser().parse_args(["fly"])
-
+def test_flight_requires_execute_before_connecting():
     with pytest.raises(SystemExit, match="--execute"):
-        main.run_flight(args)
+        main.main(["fly"])
 
 
-def test_hover_option_was_removed_from_mission_cli():
-    with pytest.raises(SystemExit):
-        main.build_parser().parse_args(["simulate", "--hover-time", "10"])
+def test_default_cutoff_is_10000m():
+    assert main.build_parser().parse_args(["fly"]).target_altitude == 10000.0
+
+
+@pytest.mark.parametrize("altitude", ["nan", "inf", "0", "-1"])
+def test_invalid_cutoff_rejected_before_connecting(altitude):
+    with pytest.raises(SystemExit, match="有限数值"):
+        main.main(["fly", "--execute", "--target-altitude", altitude])
