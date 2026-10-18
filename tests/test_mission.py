@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from condor_hopper.mission import FlightController, Sample, descent_attitude, attitude_error, unit
 
@@ -128,6 +129,21 @@ def test_terminal_command_does_not_accelerate_up_through_touchdown():
 
 def test_zero_thrust_keeps_a_finite_upright_direction():
     assert np.allclose(unit(np.zeros(3)), [1.0, 0.0, 0.0])
+
+
+def test_powered_descent_can_correct_a_25ms_entry_speed_error():
+    controller = FlightController()
+    controller.phase = "landing"
+    controller.touchdown_ut = 20.0
+    controller.plan = SimpleNamespace(at_height=lambda height: (np.array([height, 0.0, 0.0]),
+        np.array([-350.0, 0.0, 0.0]), np.array([35.0, 0.0, 0.0]), np.array([-9.81, 0.0, 0.0])))
+    controller.update_plan = lambda state: None
+    state = sample(height_m=2500.0, velocity=np.array([-375.0, 0.0, 0.0]), aero=np.array([10.0, 0.0, 0.0]),
+                   mass_kg=40000.0, thrust_n=1800000.0)
+    command = controller.update(state)
+    net_braking = command.throttle * state.thrust_n / state.mass_kg + state.aero[0] - state.gravity
+    assert net_braking > 40.0
+    controller.close()
 
 
 def test_attitude_tracks_even_when_reported_torque_is_too_large():

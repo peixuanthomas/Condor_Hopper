@@ -95,6 +95,8 @@ def fly(vehicle, target_altitude):
                        throttle=command.throttle, engine_commanded=command.engine,
                        fins_commanded=vehicle.fins_deployed, legs_commanded=vehicle.legs_deployed,
                        fin_authority_percent=vehicle.fins[0].authority_limiter,
+                       fin_pitch_enabled=vehicle.fins[0].pitch_enabled,
+                       fin_yaw_enabled=vehicle.fins[0].yaw_enabled,
                        grounded_legs=state.grounded,
                        target_up=vehicle.last_direction[0], target_north=vehicle.last_direction[1], target_east=vehicle.last_direction[2],
                        pitch_input=vehicle.control.pitch, yaw_input=vehicle.control.yaw, roll_input=vehicle.control.roll,

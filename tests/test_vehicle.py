@@ -97,8 +97,11 @@ def test_engine_restart_clears_fin_attitude_bias():
     vehicle = KrpcVehicle.__new__(KrpcVehicle)
     vehicle.fins_deployed = vehicle.legs_deployed = vehicle.attitude_active = False
     vehicle.engine_active = False
+    vehicle.manual_descent = True
+    vehicle.fins = [SimpleNamespace(pitch_enabled=True, yaw_enabled=True) for _ in range(4)]
     vehicle.engines = [SimpleNamespace(active=False)]
     vehicle.attitude_bias = np.array([0.6, 0.0, -0.8])
     vehicle.control = SimpleNamespace(throttle=0.0, rcs=False)
     vehicle.apply(Command(engine=True, hold_attitude=False), None)
     assert np.allclose(vehicle.attitude_bias, 0.0)
+    assert all(not fin.pitch_enabled and not fin.yaw_enabled for fin in vehicle.fins)

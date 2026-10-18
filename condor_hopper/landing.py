@@ -304,21 +304,24 @@ class LandingSolver:
         return None
 
     def plan_ignition(self, state):
-        coast_state = replace(state, direction=np.array([1.0, 0.0, 0.0]))
         coast, current = 0.0, state
+        coast_states = [state]
         while coast < 120.0:
             stopping_distance, _ = stopping_burn(current)
             if current.position[0] <= stopping_distance + max(20.0, -0.5 * current.velocity[0]):
                 break
-            position, velocity = propagate(coast_state, coast + 0.5)
+            direction = np.array([1.0, *(state.direction[1:] * max(0.0, 1.0 - (coast + 0.5) / 10.0))])
+            direction /= np.linalg.norm(direction)
+            segment = replace(current, direction=(current.direction + direction) / np.linalg.norm(current.direction + direction))
+            position, velocity = propagate(segment, 0.5)
             coast += 0.5
             current = shifted(state, state.ut + coast, position, velocity)
+            current.direction = direction
+            coast_states.append(current)
         candidates = []
         for delay in sorted(set(max(0.0, coast - offset) for offset in (0.0, 2.0, 5.0, 10.0)), reverse=True):
-            position, velocity = propagate(coast_state, delay)
-            start = shifted(state, state.ut + delay, position, velocity)
-            start.direction = np.array([1.0, *(state.direction[1:] * max(0.0, 1.0 - delay / 10.0))])
-            nominal_time = 2.0 * position[0] / max(-velocity[0], 1.0)
+            start = coast_states[round(delay / 0.5)]
+            nominal_time = 2.0 * start.position[0] / max(-start.velocity[0], 1.0)
             for factor in (1.0, 1.15, 1.35):
                 plan = self.solve(start, nominal_time * factor)
                 if plan is not None:

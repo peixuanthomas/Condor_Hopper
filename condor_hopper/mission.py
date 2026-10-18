@@ -234,7 +234,8 @@ class FlightController:
             model = self.landing_state(state)
             gravity_rotation = external_acceleration(actual_position, state.velocity, replace(model, drag=0.0, normal=0.0))
             desired = feedforward + environment - gravity_rotation
-            desired += bounded(0.15 * (position - actual_position) + 0.7 * (velocity - state.velocity), 3.0)
+            correction = 0.15 * (position - actual_position) + 0.7 * (velocity - state.velocity)
+            desired += correction
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
                                                        model.normal, feedforward)
         else:

@@ -58,9 +58,10 @@ def test_combined_air_and_engine_steering_changes_sign(normal, expected_sign):
     assert np.allclose(force + air, desired)
 
 
-@pytest.mark.parametrize("aero_case", ["drag", "transonic", "normal"])
+@pytest.mark.parametrize("aero_case", ["drag", "transonic", "normal", "entry_error"])
 def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
     transonic_drop = aero_case == "transonic"
+    normal_air = aero_case in {"normal", "entry_error"}
     controller = FlightController()
     controller.phase = "descent"
 
@@ -73,12 +74,13 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
     position, velocity = np.array([6000.0, 100.0, -80.0]), np.array([-300.0, 3.0, -2.0])
     if transonic_drop:
         position, velocity = np.array([4000.0, 30.0, 90.0]), np.array([-462.0, -1.0, -15.0])
-    if aero_case == "normal":
+    if normal_air:
         position, velocity = np.array([8000.0, 350.0, -250.0]), np.array([-450.0, -25.0, 20.0])
     angle, rate = np.zeros(2), np.zeros(2)
     previous_target = np.zeros(2)
     mass, ut, minimum_low_altitude_speed = 46000.0, 0.0, 1000.0
     deadline = None
+    entry_error_applied = False
     try:
         while ut < 60.0:
             direction = unit([1.0, *np.tan(angle)])
@@ -87,7 +89,7 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
                 coefficient = 0.00008 * np.exp(-position[0] / 5500.0) * 46000.0 / mass
                 coefficient *= 1.0 + 1.5 / (1.0 + np.exp((330.0 - np.linalg.norm(velocity)) / 12.0))
             aero = -coefficient * np.linalg.norm(velocity) * velocity
-            if aero_case == "normal":
+            if normal_air:
                 speed = np.linalg.norm(velocity)
                 density = np.exp((8000.0 - position[0]) / 5500.0) * 46000.0 / mass
                 aero = -0.00005 * density * speed * velocity
@@ -97,6 +99,9 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
             state = Sample(ut, position[0] + 85.0, position[0], velocity.copy(),
                            -position[1:].copy(), direction, aero, mass, 1770000.0, 9.81, 0)
             command = controller.update(state)
+            if aero_case == "entry_error" and command.engine and not entry_error_applied:
+                velocity += [-25.0, -5.0, 5.0]
+                entry_error_applied = True
             if controller.touchdown_ut is not None:
                 if deadline is None:
                     deadline = controller.touchdown_ut
@@ -122,7 +127,7 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
         assert np.linalg.norm(position[1:]) <= 5.0
         assert np.linalg.norm(velocity[1:]) < 0.5
         assert minimum_low_altitude_speed > 3.0
-        assert ut - controller.ignition_ut < (45.0 if aero_case == "normal" else 35.0)
-        assert 46000.0 - mass < (10000.0 if aero_case == "normal" else 8000.0)
+        assert ut - controller.ignition_ut < (45.0 if normal_air else 35.0)
+        assert 46000.0 - mass < (10000.0 if normal_air else 8000.0)
     finally:
         controller.close()
