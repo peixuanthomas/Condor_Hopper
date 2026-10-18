@@ -6,18 +6,13 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from .landing import LandingSolver, LandingState, external_acceleration, steering_force
+from .landing import LandingSolver, LandingState, external_acceleration, steering_force, fin_target
 
 
 def unit(vector):
     vector = np.asarray(vector, dtype=float)
     length = np.linalg.norm(vector)
     return vector / length if length > 1e-9 else np.array([1.0, 0.0, 0.0])
-
-
-def bounded(vector, maximum):
-    vector = np.asarray(vector, dtype=float)
-    return vector * min(1.0, maximum / max(float(np.linalg.norm(vector)), 1e-9))
 
 
 def attitude_error(target_local):
@@ -29,12 +24,13 @@ def attitude_error(target_local):
     return unit(axis) * max(0.0, angle - math.radians(0.1))
 
 
-def descent_attitude(target_local, angular_rate, angular_accel, bias=None, reference_rate=None):
+def descent_attitude(target_local, angular_rate, angular_accel, bias=None, reference_rate=None, max_rate=0.05):
     error = attitude_error(target_local)
     angular_accel = np.clip(np.asarray(angular_accel), 0.02, 0.12)
-    target_rate = np.clip(0.8 * error, -0.05, 0.05)
+    target_rate = 0.8 * error
     if reference_rate is not None:
-        target_rate = np.clip(target_rate + reference_rate, -0.05, 0.05)
+        target_rate += np.clip(reference_rate, -max_rate, max_rate)
+    target_rate = np.clip(target_rate, -max_rate, max_rate)
     target_rate[1] = 0.0
     command = 2.5 * (target_rate - angular_rate) / angular_accel
     return np.clip(command + (np.zeros(3) if bias is None else bias), -1.0, 1.0)
@@ -122,42 +118,20 @@ class FlightController:
         if self.pending is not None and self.pending.done():
             result = self.pending.result()
             self.pending = None
-            valid = result is not None and result.touchdown_ut > state.ut
-            if valid and self.touchdown_ut is not None:
-                valid = abs(result.touchdown_ut - self.touchdown_ut) < 0.01
-            if valid and self.phase == "descent":
-                valid = result.ignition_ut > state.ut - 0.5
+            valid = result is not None and result.touchdown_ut > state.ut and result.ignition_ut > state.ut - 0.5
+            if valid and self.plan is not None:
+                valid = result.ignition_ut <= self.plan.ignition_ut + 0.01
             if valid:
                 self.plan = result
                 self.plan_number += 1
         if self.pending is None and state.ut - self.last_plan_ut >= 1.0 and state.landing_height_m > 200.0:
-            if self.phase == "landing":
-                position, velocity, _, _ = self.plan.at(state.ut)
-                error = position - np.array([state.landing_height_m, *(-state.error)])
-                if np.linalg.norm(error) < 10.0 and np.linalg.norm(velocity - state.velocity) < 3.0:
-                    return
             initial = self.landing_state(state)
-            if self.phase == "landing":
-                initial.direction = self.last_desired_direction.copy()
-            if self.phase == "descent":
-                self.pending = self.worker.submit(self.solver.plan_ignition, initial)
-            elif self.touchdown_ut - state.ut > 1.0:
-                self.pending = self.worker.submit(self.solver.solve, initial, self.touchdown_ut - state.ut)
+            self.pending = self.worker.submit(self.solver.plan_ignition, initial)
             self.last_plan_ut = state.ut
 
     def fin_direction(self, state):
         velocity = state.velocity
         speed = np.linalg.norm(velocity)
-        retrograde = unit(-velocity + np.array([1.0, 0.0, 0.0]))
-        effective_gravity = max(0.01, state.gravity - state.aero[0])
-        braking = max(0.90 * state.thrust_n / state.mass_kg - state.gravity, 1.0)
-        falling_speed = max(-velocity[0], 1.0)
-        ignition_speed = math.sqrt(braking * (falling_speed**2 + 2 * effective_gravity * state.landing_height_m)
-                                   / (braking + effective_gravity))
-        coast_time = max(0.5, (ignition_speed - falling_speed) / effective_gravity)
-        burn_time = max(falling_speed, ignition_speed) / braking
-        desired = 2 * (state.error - velocity[1:] * (coast_time + 0.5 * burn_time)) / (coast_time * (coast_time + burn_time))
-        drag = max(0.0, -np.dot(state.aero, velocity) / max(speed**2, 1.0))
         normal = velocity - np.dot(velocity, state.direction) * state.direction
         if speed > 80 and np.linalg.norm(normal) > 5.0:
             axis_speed = np.dot(velocity, state.direction)
@@ -165,11 +139,8 @@ class FlightController:
             estimate = -np.dot(state.aero + axial_drag * velocity, normal) / np.dot(normal, normal)
             if 0.002 < estimate < 1.0:
                 self.normal_coefficient = 0.98 * self.normal_coefficient + 0.02 * estimate
-        slope = (desired + (drag + self.normal_coefficient) * velocity[1:]) / (
-                 self.normal_coefficient * min(velocity[0], -20.0))
-        retro_slope = retrograde[1:] / max(retrograde[0], 0.5)
-        slope = retro_slope + bounded(slope - retro_slope, math.tan(math.radians(20.0)))
-        return unit([1.0, *bounded(slope, math.tan(math.radians(30.0)))])
+        return fin_target(state.landing_height_m, velocity, state.error, state.aero,
+                          state.gravity, self.normal_coefficient)
 
     def update(self, state: Sample) -> Command:
         dt = 0.05 if not hasattr(self, "previous_ut") else max(0.02, min(0.2, state.ut - self.previous_ut))
@@ -194,7 +165,7 @@ class FlightController:
                 return Command()
 
         if self.phase == "descent":
-            if state.landing_height_m < 8000.0:
+            if state.landing_height_m < 12000.0:
                 self.update_plan(state)
             if self.plan is not None and state.ut >= self.plan.ignition_ut:
                 self.phase = "landing"
@@ -204,7 +175,7 @@ class FlightController:
                 if self.plan is None and state.landing_height_m < 600.0 and state.direction[0] > 0.7:
                     raise RuntimeError("未找到能在剩余燃料内到达指定着陆点的轨迹")
                 direction = self.fin_direction(state)
-                if self.plan is not None and self.plan.ignition_ut - state.ut < 3.0:
+                if self.plan is not None and self.plan.ignition_ut - state.ut < 4.0:
                     direction = unit(self.plan.acceleration[0])
                 return Command(direction=direction, fins=True, legs=state.landing_height_m < 3000.0)
 
@@ -233,21 +204,22 @@ class FlightController:
 
         if (state.landing_height_m > 200.0 and self.terminal_acceleration is None
                 and self.plan is not None):
-            self.update_plan(state)
-            position, velocity, feedforward, environment = self.plan.at_height(state.landing_height_m)
+            feedforward = self.last_desired_direction
             actual_position = np.array([state.landing_height_m, *(-state.error)])
             model = self.landing_state(state)
             gravity_rotation = external_acceleration(actual_position, state.velocity, replace(model, drag=0.0, normal=0.0))
-            desired = feedforward + environment - gravity_rotation
-            correction = 0.15 * (position - actual_position) + 0.7 * (velocity - state.velocity)
-            desired += correction
+            braking = max(0.0, (state.velocity[0]**2 - 0.7**2) / (2.0 * state.landing_height_m))
+            desired = np.array([state.gravity + braking, 0.0, 0.0])
+            remaining = max(1.0, 2.0 * state.landing_height_m / max(-state.velocity[0] + 0.7, 1.0))
+            desired[1:] = (-12.0 * actual_position[1:] / remaining**2
+                           -6.0 * state.velocity[1:] / remaining - gravity_rotation[1:])
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
                                                        model.normal, feedforward)
         else:
             height = min(state.height_m, state.landing_height_m)
             if self.terminal_acceleration is None:
                 self.terminal_acceleration = max(0.5, float((state.velocity[0]**2 - 0.7**2) / max(2 * height, 1.0)))
-                self.capture_missed = bool(np.linalg.norm(state.error) > 10.0)
+                self.capture_missed = bool(np.linalg.norm(state.error) > 5.0)
             braking = self.terminal_acceleration
             target_speed = -math.sqrt(0.7**2 + 2 * braking * max(height, 0.0))
             target_accel = braking if height > 0.0 else 0.0

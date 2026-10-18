@@ -41,6 +41,16 @@ def test_insufficient_fuel_is_rejected():
     assert LandingSolver().plan_ignition(state) is None
 
 
+def test_large_high_altitude_offset_still_has_a_return_trajectory():
+    state = LandingState(0.0, np.array([10000.0, 1000.0, -500.0]), np.array([-500.0, -25.0, 12.5]),
+                         41100.0, 19834.0, 1850000.0, 3238.0, 9.5, 0.00004,
+                         unit([1.0, 0.05, -0.025]), normal=0.02, aero_speed=500.0)
+    plan = LandingSolver().plan_ignition(state)
+    assert plan is not None
+    assert plan.rollout_error_m < 2.0
+    assert plan.fuel_kg < state.mass - state.dry_mass
+
+
 def test_rotation_deflects_equatorial_descent_eastward():
     state = initial()
     baseline = external_acceleration(state.position, state.velocity, state)
@@ -108,9 +118,12 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
                 assert controller.touchdown_ut == deadline
             target = np.arctan2(command.direction[1:], command.direction[0])
             reference_rate = (target - previous_target) / 0.05
-            desired_rate = np.clip(1.2 * (target - angle) + reference_rate, -0.052, 0.052)
+            maximum_rate = np.radians(5.0) if command.engine else 0.05
+            desired_rate = np.clip(0.8 * (target - angle) + np.clip(reference_rate, -maximum_rate, maximum_rate),
+                                   -maximum_rate, maximum_rate)
             previous_target = target.copy()
-            rate += np.clip(3.0 * (desired_rate - rate), -0.08, 0.08) * 0.05
+            maximum_acceleration = 0.12 if command.engine else 0.08
+            rate += np.clip(2.5 * (desired_rate - rate), -maximum_acceleration, maximum_acceleration) * 0.05
             angle += rate * 0.05
             actual_direction = unit([1.0, *np.tan(angle)])
             acceleration = command.throttle * 1770000.0 / mass * actual_direction + aero - [9.81, 0.0, 0.0]

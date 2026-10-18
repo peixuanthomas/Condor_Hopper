@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from types import SimpleNamespace
+from concurrent.futures import Future
 
 from condor_hopper.mission import FlightController, Sample, descent_attitude, attitude_error, unit
 
@@ -40,6 +41,12 @@ def test_descent_attitude_stops_rotation_when_already_aligned():
     assert np.all(command * rates < 0.0)
 
 
+def test_moving_target_cannot_reverse_correction_of_a_large_attitude_error():
+    command = descent_attitude([0.0, np.cos(0.25), np.sin(0.25)], np.zeros(3), [0.1, 0.1, 0.1],
+                               reference_rate=np.array([0.087, 0.0, 0.0]))
+    assert command[0] < 0.0
+
+
 def test_descent_attitude_converges_in_both_pitch_directions():
     for initial in (-0.15, 0.15):
         angle, rate = initial, 0.0
@@ -70,12 +77,26 @@ def test_descent_confirmation_resets_when_vessel_rises():
         assert not controller.update(sample(ut=ut, height_m=5000.0, velocity=np.array([speed, 0.0, 0.0]))).fins
 
 
-def test_fin_prediction_includes_the_time_spent_in_the_landing_burn():
+def test_replanning_cannot_keep_delaying_an_accepted_ignition():
+    controller = FlightController()
+    controller.phase = "descent"
+    initial = SimpleNamespace(ignition_ut=8.0, touchdown_ut=30.0)
+    controller.plan = initial
+    controller.last_plan_ut = 5.0
+    controller.pending = Future()
+    controller.pending.set_result(SimpleNamespace(ignition_ut=10.0, touchdown_ut=30.0))
+    controller.update_plan(sample(ut=5.0, height_m=6000.0))
+    assert controller.plan is initial
+    controller.close()
+
+
+def test_fins_aim_to_finish_horizontal_return_before_powered_touchdown():
     controller = FlightController()
     state = sample(height_m=5000.0, mass_kg=40000.0, thrust_n=1800000.0,
                    velocity=np.array([-300.0, 10.0, 0.0]), error=np.array([140.55, 0.0]))
-    # 这组条件在滑行加制动约 20 秒后接地，水平速度线性减到零。
-    assert np.allclose(controller.fin_direction(state), unit([300.0, -10.0, 0.0]), atol=1e-4)
+    direction = controller.fin_direction(state)
+    # 无动力落地时间更短；应先向目标加速，不能把位移留到燃烧末段。
+    assert direction[1] < unit([300.0, -10.0, 0.0])[1]
     controller.close()
 
 
@@ -162,14 +183,13 @@ def test_powered_descent_can_correct_a_25ms_entry_speed_error():
     controller = FlightController()
     controller.phase = "landing"
     controller.touchdown_ut = 20.0
-    controller.plan = SimpleNamespace(at_height=lambda height: (np.array([height, 0.0, 0.0]),
-        np.array([-350.0, 0.0, 0.0]), np.array([35.0, 0.0, 0.0]), np.array([-9.81, 0.0, 0.0])))
+    controller.plan = object()
     controller.update_plan = lambda state: None
     state = sample(height_m=2500.0, velocity=np.array([-375.0, 0.0, 0.0]), aero=np.array([10.0, 0.0, 0.0]),
                    mass_kg=40000.0, thrust_n=1800000.0)
     command = controller.update(state)
     net_braking = command.throttle * state.thrust_n / state.mass_kg + state.aero[0] - state.gravity
-    assert net_braking > 40.0
+    assert net_braking == pytest.approx((375.0**2 - 0.7**2) / (2.0 * 2500.0))
     controller.close()
 
 

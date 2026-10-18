@@ -189,7 +189,8 @@ class KrpcVehicle:
         dt = 0.05 if self.last_ut is None else max(0.0, state.ut - self.last_ut)
         self.last_ut = state.ut
         angle = math.acos(float(np.clip(np.dot(self.last_direction, command.direction), -1.0, 1.0)))
-        fraction = min(1.0, math.radians(5.0) * dt / max(angle, 1e-9))
+        turn_rate = (4.0 if self.engine_active else 2.5) if self.manual_descent else 5.0
+        fraction = min(1.0, math.radians(turn_rate) * dt / max(angle, 1e-9))
         old_direction = self.last_direction.copy()
         self.last_direction = unit((1.0 - fraction) * self.last_direction + fraction * command.direction)
         if self.manual_descent:
@@ -210,7 +211,8 @@ class KrpcVehicle:
             self.angular_rate = rate
             requested_rate = -np.cross(old_direction, self.last_direction) / max(dt, 0.02)
             requested_rate = np.array(self.sc.transform_direction(tuple(requested_rate), self.frame, self.vessel.reference_frame))
-            command_input = descent_attitude(local_target, rate, self.angular_accel, self.attitude_bias, requested_rate)
+            maximum_rate = math.radians(5.0) if self.engine_active else 0.05
+            command_input = descent_attitude(local_target, rate, self.angular_accel, self.attitude_bias, requested_rate, maximum_rate)
             error = attitude_error(local_target)
             correcting = (np.abs(command_input) < 0.99) | (command_input * error < 0.0)
             # 抵消持续把机体推回迎风方向的空气作用，避免有偏角却一直转不过去。
