@@ -104,6 +104,8 @@ def fly(vehicle, target_altitude):
                        angular_accel_pitch=vehicle.angular_accel[0], angular_accel_yaw=vehicle.angular_accel[2],
                        angular_rate_pitch=vehicle.angular_rate[0], angular_rate_yaw=vehicle.angular_rate[2],
                        aero_up_ms2=state.aero[0], aero_north_ms2=state.aero[1], aero_east_ms2=state.aero[2],
+                       measured_north_acceleration_ms2=controller.horizontal_acceleration[0],
+                       measured_east_acceleration_ms2=controller.horizontal_acceleration[1],
                        plan_number=controller.plan_number, touchdown_ut=controller.touchdown_ut,
                        planned_ignition_ut=controller.plan.ignition_ut if controller.plan else None,
                        predicted_burn_fuel_kg=controller.plan.fuel_kg if controller.plan else None,

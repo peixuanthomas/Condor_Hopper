@@ -12,6 +12,22 @@ def initial(height=2200.0, speed=-300.0, offset=20.0):
                         46000.0, 20000.0, 1770000.0, 3238.0, 9.81, 0.0001, np.array([1.0, 0.0, 0.0]))
 
 
+def attitude_step(command, previous_target, angle, rate):
+    target = np.arctan2(command.direction[1:], command.direction[0])
+    change = target - previous_target
+    turn_rate = np.radians(4.0 if command.engine else 2.5)
+    target = previous_target + change * min(1.0, turn_rate * 0.05 / max(np.linalg.norm(change), 1e-9))
+    reference_rate = (target - previous_target) / 0.05
+    maximum_rate = np.radians(5.0) if command.engine else 0.05
+    desired_rate = np.clip(0.8 * (target - angle) + np.clip(reference_rate, -maximum_rate, maximum_rate),
+                           -maximum_rate, maximum_rate)
+    maximum_acceleration = 0.12 if command.engine else 0.08
+    angular_accel = np.clip(2.5 * (desired_rate - rate), -maximum_acceleration, maximum_acceleration)
+    rate = rate + angular_accel * 0.05
+    angle = angle + rate * 0.05
+    return unit([1.0, *np.tan(angle)]), target, angle, rate, angular_accel
+
+
 def test_plan_respects_fuel_thrust_slew_and_terminal_conditions():
     state = initial()
     plan = LandingSolver().plan_ignition(state)
@@ -116,16 +132,7 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
                 if deadline is None:
                     deadline = controller.touchdown_ut
                 assert controller.touchdown_ut == deadline
-            target = np.arctan2(command.direction[1:], command.direction[0])
-            reference_rate = (target - previous_target) / 0.05
-            maximum_rate = np.radians(5.0) if command.engine else 0.05
-            desired_rate = np.clip(0.8 * (target - angle) + np.clip(reference_rate, -maximum_rate, maximum_rate),
-                                   -maximum_rate, maximum_rate)
-            previous_target = target.copy()
-            maximum_acceleration = 0.12 if command.engine else 0.08
-            rate += np.clip(2.5 * (desired_rate - rate), -maximum_acceleration, maximum_acceleration) * 0.05
-            angle += rate * 0.05
-            actual_direction = unit([1.0, *np.tan(angle)])
+            actual_direction, previous_target, angle, rate, _ = attitude_step(command, previous_target, angle, rate)
             acceleration = command.throttle * 1770000.0 / mass * actual_direction + aero - [9.81, 0.0, 0.0]
             position += velocity * 0.05 + 0.5 * acceleration * 0.05**2
             velocity += acceleration * 0.05
@@ -142,5 +149,43 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
         assert minimum_low_altitude_speed > 3.0
         assert ut - controller.ignition_ut < (45.0 if normal_air else 35.0)
         assert 46000.0 - mass < (10000.0 if normal_air else 8000.0)
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize("air_scale", [0.8, 1.0, 1.2])
+def test_last_kilometre_cancels_horizontal_speed_before_contact(air_scale):
+    controller = FlightController()
+    controller.phase = "landing"
+    controller.plan = object()
+    # 取侧翻试飞在约一千米处的实测入口，加入喷口转向时的反向侧推。
+    position, velocity = np.array([993.44, -10.517, 24.879]), np.array([-205.081, -0.668, -3.998])
+    direction = unit([1.0, -0.045, 0.080])
+    angle = np.arctan2(direction[1:], direction[0])
+    previous_target, rate = angle.copy(), np.zeros(2)
+    mass, ut, minimum_speed = 38315.0, 0.0, 1000.0
+    try:
+        while ut < 15.0 and position[0] > 0.0:
+            speed = np.linalg.norm(velocity)
+            density = np.exp((1000.0 - position[0]) / 5500.0) * 38315.0 / mass
+            drag, normal = 0.0359 * density * speed / 205.0, air_scale * 0.0839 * density * speed / 205.0
+            aero = -drag * velocity - normal * (velocity - np.dot(velocity, direction) * direction)
+            command = controller.update(Sample(ut, position[0] + 85.0, position[0], velocity.copy(),
+                -position[1:].copy(), direction, aero, mass, 1783000.0, 9.81, 0))
+            direction, previous_target, angle, rate, angular_accel = attitude_step(command, previous_target, angle, rate)
+            acceleration = command.throttle * 1783000.0 / mass * direction + aero - [9.81, 0.0, 0.0]
+            acceleration[1:] -= 4.0 * angular_accel
+            position += velocity * 0.05 + 0.5 * acceleration * 0.05**2
+            velocity += acceleration * 0.05
+            mass -= command.throttle * 1783000.0 / 3238.0 * 0.05
+            ut += 0.05
+            if 3.0 < position[0] < 200.0:
+                minimum_speed = min(minimum_speed, -velocity[0])
+        assert position[0] <= 0.0
+        assert np.linalg.norm(position[1:]) <= 5.0
+        assert np.linalg.norm(velocity[1:]) < 0.5
+        assert -1.2 < velocity[0] < 0.0
+        assert np.degrees(np.arccos(direction[0])) < 3.0
+        assert minimum_speed > 3.0
     finally:
         controller.close()

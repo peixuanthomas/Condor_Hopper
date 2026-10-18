@@ -94,6 +94,8 @@ class FlightController:
         self.identified_normal = self.normal_coefficient
         self.capture_missed = False
         self.last_desired_direction = np.array([1.0, 0.0, 0.0])
+        self.previous_velocity = None
+        self.horizontal_acceleration = np.zeros(2)
 
     def close(self):
         self.worker.shutdown(wait=True, cancel_futures=True)
@@ -143,7 +145,12 @@ class FlightController:
                           state.gravity, self.normal_coefficient)
 
     def update(self, state: Sample) -> Command:
-        dt = 0.05 if not hasattr(self, "previous_ut") else max(0.02, min(0.2, state.ut - self.previous_ut))
+        elapsed = 0.05 if not hasattr(self, "previous_ut") else state.ut - self.previous_ut
+        dt = max(0.02, min(0.2, elapsed))
+        if self.previous_velocity is not None and elapsed > 0.001:
+            measured = (state.velocity[1:] - self.previous_velocity[1:]) / elapsed
+            self.horizontal_acceleration += elapsed / (0.2 + elapsed) * (measured - self.horizontal_acceleration)
+        self.previous_velocity = state.velocity.copy()
         self.previous_ut = state.ut
         self.apogee_altitude_m = max(self.apogee_altitude_m, state.altitude_m)
         if self.phase == "ascent":
@@ -211,8 +218,12 @@ class FlightController:
             braking = max(0.0, (state.velocity[0]**2 - 0.7**2) / (2.0 * state.landing_height_m))
             desired = np.array([state.gravity + braking, 0.0, 0.0])
             remaining = max(1.0, 2.0 * state.landing_height_m / max(-state.velocity[0] + 0.7, 1.0))
-            desired[1:] = (-12.0 * actual_position[1:] / remaining**2
-                           -6.0 * state.velocity[1:] / remaining - gravity_rotation[1:])
+            horizontal = -12.0 * actual_position[1:] / remaining**2 - 6.0 * state.velocity[1:] / remaining
+            if state.landing_height_m < 1000.0:
+                # 末段给转向留一秒，不能等水平速度归零后才开始收掉倾角。
+                horizontal = (self.horizontal_acceleration - 60.0 * actual_position[1:] / remaining**3
+                              -36.0 * state.velocity[1:] / remaining**2 - 9.0 * self.horizontal_acceleration / remaining)
+            desired[1:] = horizontal - gravity_rotation[1:]
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
                                                        model.normal, feedforward)
         else:
@@ -227,7 +238,9 @@ class FlightController:
             if height < 3.0:
                 vertical = max(0.0, min(vertical, state.gravity + (-0.7 - state.velocity[0]) / dt))
             remaining = max(0.25, 2 * max(height, 0.0) / max(-state.velocity[0] + 0.7, 1.0))
-            horizontal = -2.0 * state.velocity[1:] / remaining
+            horizon = max(remaining, 1.0)
+            horizontal = (self.horizontal_acceleration - 6.0 * state.velocity[1:] / horizon**2
+                          - 4.0 * self.horizontal_acceleration / horizon)
             model = self.landing_state(state)
             desired = np.array([vertical, *horizontal])
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
