@@ -202,8 +202,8 @@ class LandingSolver:
     def solve(self, state, duration):
         if duration < 0.5 or duration > 45.0 or state.position[0] <= 0.0:
             return None
-        # 跨音速时轴向阻力可能骤降，规划不能依赖它完成最后制动。
-        state = replace(state, drag=0.0)
+        # 点火后必须由发动机完成制导，不能把预计的空气作用当成可控推力。
+        state = replace(state, drag=0.0, normal=0.0)
         n, dt = self.nodes, duration / self.nodes
         times = np.linspace(0.0, duration, n + 1)
         rref = np.linspace(state.position, np.zeros(3), n + 1)
@@ -310,7 +310,7 @@ class LandingSolver:
             stopping_distance, _ = stopping_burn(current)
             if current.position[0] <= stopping_distance + max(20.0, -0.5 * current.velocity[0]):
                 break
-            direction = np.array([1.0, *(state.direction[1:] * max(0.0, 1.0 - (coast + 0.5) / 10.0))])
+            direction = np.array([1.0, *(state.direction[1:] * max(0.0, 1.0 - (coast + 0.5) / 3.0))])
             direction /= np.linalg.norm(direction)
             segment = replace(current, direction=(current.direction + direction) / np.linalg.norm(current.direction + direction))
             position, velocity = propagate(segment, 0.5)

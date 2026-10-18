@@ -149,10 +149,13 @@ class FlightController:
         velocity = state.velocity
         speed = np.linalg.norm(velocity)
         retrograde = unit(-velocity + np.array([1.0, 0.0, 0.0]))
-        effective_gravity = max(2.0, state.gravity - state.aero[0])
-        time_to_ground = (velocity[0] + math.sqrt(velocity[0]**2 + 2 * effective_gravity * state.landing_height_m)) / effective_gravity
-        burn_time = min(0.5 * time_to_ground, -velocity[0] / max(state.thrust_n / state.mass_kg - state.gravity, 1.0))
-        coast_time = max(2.0, time_to_ground - burn_time)
+        effective_gravity = max(0.01, state.gravity - state.aero[0])
+        braking = max(0.90 * state.thrust_n / state.mass_kg - state.gravity, 1.0)
+        falling_speed = max(-velocity[0], 1.0)
+        ignition_speed = math.sqrt(braking * (falling_speed**2 + 2 * effective_gravity * state.landing_height_m)
+                                   / (braking + effective_gravity))
+        coast_time = max(0.5, (ignition_speed - falling_speed) / effective_gravity)
+        burn_time = max(falling_speed, ignition_speed) / braking
         desired = 2 * (state.error - velocity[1:] * (coast_time + 0.5 * burn_time)) / (coast_time * (coast_time + burn_time))
         drag = max(0.0, -np.dot(state.aero, velocity) / max(speed**2, 1.0))
         normal = velocity - np.dot(velocity, state.direction) * state.direction
@@ -201,7 +204,7 @@ class FlightController:
                 if self.plan is None and state.landing_height_m < 600.0 and state.direction[0] > 0.7:
                     raise RuntimeError("未找到能在剩余燃料内到达指定着陆点的轨迹")
                 direction = self.fin_direction(state)
-                if self.plan is not None and self.plan.ignition_ut - state.ut < 10.0:
+                if self.plan is not None and self.plan.ignition_ut - state.ut < 3.0:
                     direction = unit(self.plan.acceleration[0])
                 return Command(direction=direction, fins=True, legs=state.landing_height_m < 3000.0)
 
@@ -211,6 +214,8 @@ class FlightController:
             self.phase = "contact"
 
         if self.phase in {"contact", "landed"}:
+            if state.direction[0] < math.cos(math.radians(30.0)):
+                raise RuntimeError("接地后侧翻，停止本次试飞")
             stable = (state.grounded >= 3 and abs(float(state.velocity[0])) <= 1.0
                       and np.linalg.norm(state.velocity[1:]) <= 0.5
                       and state.direction[0] >= math.cos(math.radians(3.0)))
@@ -249,12 +254,13 @@ class FlightController:
             vertical = max(0.1, state.gravity + target_accel + 1.5 * (target_speed - state.velocity[0]))
             if height < 3.0:
                 vertical = max(0.0, min(vertical, state.gravity + (-0.7 - state.velocity[0]) / dt))
-            remaining = max(1.0, 2 * max(height, 0.0) / max(-state.velocity[0] + 0.7, 1.0))
-            horizontal = -state.velocity[1:] / remaining
+            remaining = max(0.25, 2 * max(height, 0.0) / max(-state.velocity[0] + 0.7, 1.0))
+            horizontal = -2.0 * state.velocity[1:] / remaining
             model = self.landing_state(state)
             desired = np.array([vertical, *horizontal])
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
-                                                       model.normal, np.array([1.0, 0.0, 0.0]), 5.0)
+                                                       model.normal, np.array([1.0, 0.0, 0.0]),
+                                                       5.0 * min(1.0, max(height, 0.0) / 40.0))
         throttle = float(np.clip(np.linalg.norm(acceleration) * state.mass_kg / state.thrust_n, 0.0, 1.0))
         self.last_desired_direction = direction.copy()
         return Command(throttle=throttle, direction=direction, engine=True, fins=True, legs=True)

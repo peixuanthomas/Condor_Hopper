@@ -70,6 +70,15 @@ def test_descent_confirmation_resets_when_vessel_rises():
         assert not controller.update(sample(ut=ut, height_m=5000.0, velocity=np.array([speed, 0.0, 0.0]))).fins
 
 
+def test_fin_prediction_includes_the_time_spent_in_the_landing_burn():
+    controller = FlightController()
+    state = sample(height_m=5000.0, mass_kg=40000.0, thrust_n=1800000.0,
+                   velocity=np.array([-300.0, 10.0, 0.0]), error=np.array([140.55, 0.0]))
+    # 这组条件在滑行加制动约 20 秒后接地，水平速度线性减到零。
+    assert np.allclose(controller.fin_direction(state), unit([300.0, -10.0, 0.0]), atol=1e-4)
+    controller.close()
+
+
 def test_contact_cuts_engine_and_bounce_cannot_restart_it():
     controller = FlightController()
     controller.phase = "landing"
@@ -80,6 +89,14 @@ def test_contact_cuts_engine_and_bounce_cannot_restart_it():
     controller.update(sample(ut=101.0, grounded=4))
     controller.update(sample(ut=102.1, grounded=4))
     assert controller.phase == "landed" and controller.success
+
+
+def test_tip_after_contact_aborts_instead_of_waiting_for_stability():
+    controller = FlightController()
+    controller.phase = "contact"
+    with pytest.raises(RuntimeError, match="侧翻"):
+        controller.update(sample(direction=np.array([0.5, 0.0, 0.866])))
+    controller.close()
 
 
 @pytest.mark.parametrize("distance,success", [(4.9, True), (5.1, False)])
@@ -125,6 +142,16 @@ def test_terminal_command_does_not_accelerate_up_through_touchdown():
     acceleration = command.throttle * state.thrust_n / state.mass_kg * command.direction[0] - state.gravity
     assert state.velocity[0] + 0.05 * acceleration <= -0.7 + 1e-6
     controller.close()
+
+
+def test_terminal_tilt_shrinks_before_contact():
+    for height in (20.0, 5.0):
+        controller = FlightController()
+        controller.phase = "landing"
+        command = controller.update(sample(height_m=height, velocity=np.array([-30.0, 5.0, 0.0])))
+        angle = np.degrees(np.arccos(command.direction[0]))
+        assert angle <= 5.0 * height / 40.0 + 1e-6
+        controller.close()
 
 
 def test_zero_thrust_keeps_a_finite_upright_direction():
