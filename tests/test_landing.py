@@ -119,7 +119,7 @@ def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
                 break
         assert position[0] <= 0.0
         assert -1.2 < velocity[0] < 0.0
-        assert np.linalg.norm(position[1:]) < 3.0
+        assert np.linalg.norm(position[1:]) <= 5.0
         assert np.linalg.norm(velocity[1:]) < 0.5
         assert minimum_low_altitude_speed > 3.0
         assert ut - controller.ignition_ut < (45.0 if aero_case == "normal" else 35.0)

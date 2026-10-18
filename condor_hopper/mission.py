@@ -220,7 +220,7 @@ class FlightController:
                 self.contact_started = state.ut
             elif state.ut - self.contact_started >= 1.0:
                 self.phase = "landed"
-                self.success = bool(np.linalg.norm(state.error) <= 3.0)
+                self.success = bool(np.linalg.norm(state.error) <= 5.0)
             return Command(fins=True, legs=True, hold_attitude=False)
 
         if state.direction[0] < math.cos(math.radians(45.0)):

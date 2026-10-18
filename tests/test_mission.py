@@ -81,12 +81,13 @@ def test_contact_cuts_engine_and_bounce_cannot_restart_it():
     assert controller.phase == "landed" and controller.success
 
 
-def test_far_landing_is_reported_as_failure():
+@pytest.mark.parametrize("distance,success", [(4.9, True), (5.1, False)])
+def test_landing_accepts_only_positions_within_five_metres(distance, success):
     controller = FlightController()
     controller.phase = "landing"
     for ut in (100.0, 101.1):
-        controller.update(sample(ut=ut, grounded=4, error=np.array([10.0, 0.0])))
-    assert controller.phase == "landed" and not controller.success
+        controller.update(sample(ut=ut, grounded=4, error=np.array([distance, 0.0])))
+    assert controller.phase == "landed" and controller.success == success
 
 
 
