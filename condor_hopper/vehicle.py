@@ -42,7 +42,6 @@ class KrpcVehicle:
         self.manual_descent = False
         self.angular_accel = np.ones(3)
         self.angular_rate = np.zeros(3)
-        self.thrust_direction = np.array([1.0, 0.0, 0.0])
         self.attitude_bias = np.zeros(3)
         self.last_torque_update = float("-inf")
         self.max_thrust = sum(e.max_thrust * e.thrust_limit for e in self.engines)
@@ -54,7 +53,6 @@ class KrpcVehicle:
             velocity=connection.add_stream(self.vessel.velocity, self.body.reference_frame),
             position=connection.add_stream(self.vessel.position, self.body.reference_frame),
             direction=connection.add_stream(self.vessel.direction, self.frame),
-            thrust_direction=connection.add_stream(self.engines[0].thrusters[0].thrust_direction, self.frame),
             angular_velocity=connection.add_stream(self.vessel.angular_velocity, self.body.reference_frame),
             aero=connection.add_stream(getattr, self.flight, "aerodynamic_force"))
         for stream in self.streams.values():
@@ -132,7 +130,6 @@ class KrpcVehicle:
         error = np.array(self.sc.transform_direction(tuple(offset), self.body.reference_frame, self.frame))[1:]
         if self.legs_deployed:
             self.touchdown_height = max(-leg.part.bounding_box(self.frame)[0][0] for leg in self.legs) + 0.5
-        self.thrust_direction = np.array(self.streams["thrust_direction"]())
         state = Sample(ut=ut, altitude_m=altitude,
                        height_m=self.streams["surface_altitude"]() - self.touchdown_height,
                        target_height_m=altitude - self.target_terrain_altitude - self.touchdown_height,

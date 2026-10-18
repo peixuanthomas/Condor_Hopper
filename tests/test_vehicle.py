@@ -39,7 +39,6 @@ def fake_vehicle():
                            surface_altitude=lambda: vehicle.flight.surface_altitude,
                            mass=lambda: vessel.mass, velocity=lambda: vessel.velocity(body_frame),
                            position=lambda: vessel.position(body_frame), direction=lambda: vessel.direction(surface_frame),
-                           thrust_direction=lambda: vessel.direction(surface_frame),
                            aero=lambda: vehicle.flight.aerodynamic_force)
     return vehicle, body_frame, calls
 

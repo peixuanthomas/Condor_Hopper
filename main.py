@@ -103,8 +103,6 @@ def fly(vehicle, target_altitude):
                        attitude_error_deg=math.degrees(math.acos(float(np.clip(np.dot(state.direction, vehicle.last_direction), -1.0, 1.0)))),
                        angular_accel_pitch=vehicle.angular_accel[0], angular_accel_yaw=vehicle.angular_accel[2],
                        angular_rate_pitch=vehicle.angular_rate[0], angular_rate_yaw=vehicle.angular_rate[2],
-                       thrust_direction_up=vehicle.thrust_direction[0],
-                       thrust_direction_north=vehicle.thrust_direction[1], thrust_direction_east=vehicle.thrust_direction[2],
                        aero_up_ms2=state.aero[0], aero_north_ms2=state.aero[1], aero_east_ms2=state.aero[2],
                        plan_number=controller.plan_number, touchdown_ut=controller.touchdown_ut,
                        planned_ignition_ut=controller.plan.ignition_ut if controller.plan else None,
