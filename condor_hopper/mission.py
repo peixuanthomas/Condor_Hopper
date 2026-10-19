@@ -9,6 +9,9 @@ import numpy as np
 from .landing import LandingSolver, LandingState, external_acceleration, steering_force, fin_target
 
 
+DEFAULT_CUTOFF_ALTITUDE_M = 20000.0
+
+
 def unit(vector):
     vector = np.asarray(vector, dtype=float)
     length = np.linalg.norm(vector)
@@ -67,7 +70,7 @@ class Command:
 
 
 class FlightController:
-    def __init__(self, cutoff_altitude_m=10000.0, dry_mass=19834.0, exhaust_velocity=3238.0,
+    def __init__(self, cutoff_altitude_m=DEFAULT_CUTOFF_ALTITUDE_M, dry_mass=19834.0, exhaust_velocity=3238.0,
                  rotation=None, radius=600_000.0):
         self.cutoff_target_m = cutoff_altitude_m
         self.phase = "ascent"

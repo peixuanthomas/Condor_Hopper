@@ -15,17 +15,17 @@ def sample(**values):
     return Sample(**defaults)
 
 
-def test_ascent_full_throttle_until_sea_level_10000m():
+def test_ascent_full_throttle_until_sea_level_20000m():
     controller = FlightController()
-    for altitude in (85.0, 5000.0, 9999.9):
+    for altitude in (85.0, 5000.0, 10000.0, 19999.9):
         command = controller.update(sample(altitude_m=altitude, height_m=altitude - 85.0))
         assert command.throttle == 1.0 and command.engine
         assert not command.fins and not command.legs
         assert np.allclose(command.direction, [1.0, 0.0, 0.0])
-    command = controller.update(sample(altitude_m=10000.0, height_m=9915.0, velocity=np.array([400.0, 0.0, 0.0])))
+    command = controller.update(sample(altitude_m=20000.0, height_m=19915.0, velocity=np.array([400.0, 0.0, 0.0])))
     assert controller.phase == "coast"
     assert command.throttle == 0.0 and not command.engine
-    assert controller.cutoff_altitude_m == 10000.0
+    assert controller.cutoff_altitude_m == 20000.0
 
 
 def test_descent_attitude_matches_body_pitch_and_yaw_signs():

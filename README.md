@@ -1,6 +1,6 @@
 # Condor Hopper
 
-通过 Python 和 kRPC 控制 KSP 中的 `Condor-Hopper`：全油门竖直上升至**海拔 10000 米**后熄火，保持姿态滑行，下降后用栅格舵修正落点，再重新点火减速着陆。
+通过 Python 和 kRPC 控制 KSP 中的 `Condor-Hopper`：默认全油门竖直上升至**海拔 20000 米**后熄火，保持姿态滑行，下降后用栅格舵修正落点，再重新点火减速着陆。
 
 着陆目标为**南纬 0°12′21″、西经 74°28′23″**（`-0.20583333, -74.47305556`），距发射台约 1442 米。程序从游戏读取目标地面海拔，落点允许误差为 **5 米**。
 
@@ -10,22 +10,28 @@
 
 试飞前将飞行器放回发射台，恢复燃料，收起栅格舵和支腿，保持静止、竖直。游戏应正常播放；数据停止更新超过三秒，程序会停止控制。
 
-在本目录安装依赖并检查载具：
+在本目录安装命令和依赖：
 
 ```powershell
-python -m pip install -r requirements.txt
-python main.py probe
+python -m pip install -e .
 ```
 
-`probe` 只读取数据，输出载具、燃料、目标坐标和距离。确认准备完毕后，执行一次实际飞行：
+安装后可在任意目录使用：
 
 ```powershell
-python main.py fly --execute
+condor-hopper probe
+condor-hopper fly
+condor-hopper fly --target-altitude 10000
+condor-hopper --help
 ```
+
+`probe` 只检查状态，输出载具、燃料、目标坐标和距离。`fly` 直接执行一次完整飞行，默认海拔 **20000 米**熄火，无需 `--execute`；`--target-altitude` 可指定其他熄火海拔。直接输入 `condor-hopper` 或使用 `--help` 查看命令说明。
+
+仍可在项目目录使用 `python main.py probe` 和 `python main.py fly`。
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
-| `--target-altitude` | `10000` | 发动机熄火的海拔，单位米；只用于 `fly` |
+| `--target-altitude` | `20000` | 发动机熄火的海拔，单位米；只用于 `fly` |
 | `--address` | `127.0.0.1` | kRPC 服务器地址 |
 | `--rpc-port` | `50000` | 控制连接端口 |
 | `--stream-port` | `50001` | 飞行数据端口 |
@@ -54,13 +60,13 @@ python main.py fly --execute
 
 ## 最近一次试飞
 
-2026-10-18 的记录 `20261018_221931_803215` 已完成指定地点接地。实测熄火海拔约 **10001 米**，最高海拔约 **30521 米**；着陆燃烧约 **27.2 秒**，消耗燃料约 **5.79 吨**。
+以下为原 **10000 米熄火设置**的试飞记录。2026-10-18 的记录 `20261018_221931_803215` 已完成指定地点接地。实测熄火海拔约 **10001 米**，最高海拔约 **30521 米**；着陆燃烧约 **27.2 秒**，消耗燃料约 **5.79 吨**。
 
 首次支腿接地时，距目标 **2.16 米**，下降速度约 **0.98 米/秒**，水平速度约 **1.32 米/秒**，倾角约 **4.0°**。落点已进入要求范围，接地后的稳定检查尚未通过，末段水平速度与转正时机仍有改进空间。该次程序最终因游戏数据停止更新而退出，`summary.json` 中的 `success` 为 `false`。
 
 ## 飞行记录与验证
 
-每次飞行写入 `flight_logs/时间/`，每条数据立即保存：
+每次飞行写入项目目录下的 `flight_logs/时间/`，从其他目录运行命令也保存在这里。每条数据立即保存：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -75,6 +81,7 @@ python main.py fly --execute
 运行离线测试：
 
 ```powershell
+python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
@@ -82,7 +89,8 @@ python -m pytest
 
 ## 代码位置
 
-- [main.py](main.py)：命令入口、飞行循环和记录。
+- [cli.py](condor_hopper/cli.py)：`condor-hopper` 命令入口、飞行循环和记录。
+- [main.py](main.py)：保留直接运行 Python 脚本的入口。
 - [vehicle.py](condor_hopper/vehicle.py)：读取游戏数据、检查载具、控制发动机与舵面。
 - [mission.py](condor_hopper/mission.py)：飞行阶段、姿态控制与末段减速。
 - [landing.py](condor_hopper/landing.py)：点火时机、轨迹计算和运动检查。
