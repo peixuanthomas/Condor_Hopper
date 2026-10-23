@@ -77,6 +77,49 @@ def test_descent_confirmation_resets_when_vessel_rises():
         assert not controller.update(sample(ut=ut, height_m=5000.0, velocity=np.array([speed, 0.0, 0.0]))).fins
 
 
+@pytest.mark.parametrize("phase", ["descent", "landing"])
+@pytest.mark.parametrize("height,deployed", [(800.1, False), (800.0, True), (799.9, True)])
+def test_legs_deploy_at_800m_in_both_descent_phases(phase, height, deployed):
+    controller = FlightController()
+    controller.phase = phase
+    controller.update_plan = lambda state: None
+    controller.plan = SimpleNamespace(ignition_ut=10.0, touchdown_ut=30.0)
+    try:
+        command = controller.update(sample(height_m=height + 10.0, target_height_m=height,
+                                           velocity=np.array([-100.0, 0.0, 0.0])))
+        assert command.legs == deployed
+    finally:
+        controller.close()
+
+
+def test_planned_landing_ignites_above_800m_with_legs_stowed():
+    controller = FlightController()
+    controller.phase = "descent"
+    controller.update_plan = lambda state: None
+    controller.plan = SimpleNamespace(ignition_ut=10.0, touchdown_ut=30.0,
+                                      acceleration=np.array([[1.0, 0.0, 0.0]]))
+    try:
+        state = sample(ut=9.9, height_m=3000.0, velocity=np.array([-300.0, 0.0, 0.0]))
+        assert not controller.update(state).engine
+        state.ut = 10.0
+        command = controller.update(state)
+        assert controller.phase == "landing" and controller.ignition_ut == 10.0
+        assert command.engine and command.throttle > 0.0
+        assert not command.legs
+    finally:
+        controller.close()
+
+
+def test_tilted_landing_keeps_legs_stowed_above_800m():
+    controller = FlightController()
+    controller.phase = "landing"
+    try:
+        command = controller.update(sample(height_m=1000.0, direction=np.array([0.5, 0.0, 0.866])))
+        assert not command.engine and not command.legs
+    finally:
+        controller.close()
+
+
 def test_replanning_cannot_keep_delaying_an_accepted_ignition():
     controller = FlightController()
     controller.phase = "descent"

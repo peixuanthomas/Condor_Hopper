@@ -174,6 +174,7 @@ class FlightController:
             if self.phase == "coast":
                 return Command()
 
+        deploy_legs = state.landing_height_m <= 800.0
         if self.phase == "descent":
             if state.landing_height_m < 12000.0:
                 self.update_plan(state)
@@ -187,7 +188,7 @@ class FlightController:
                 direction = self.fin_direction(state)
                 if self.plan is not None and self.plan.ignition_ut - state.ut < 4.0:
                     direction = unit(self.plan.acceleration[0])
-                return Command(direction=direction, fins=True, legs=state.landing_height_m < 3000.0)
+                return Command(direction=direction, fins=True, legs=deploy_legs)
 
         if self.phase == "landing" and state.grounded >= 1:
             if abs(float(state.velocity[0])) > 3.0:
@@ -210,7 +211,7 @@ class FlightController:
             return Command(fins=True, legs=True, hold_attitude=False)
 
         if state.direction[0] < math.cos(math.radians(45.0)):
-            return Command(fins=True, legs=True)
+            return Command(fins=True, legs=deploy_legs)
 
         if (state.landing_height_m > 200.0 and self.terminal_acceleration is None
                 and self.plan is not None):
@@ -251,4 +252,4 @@ class FlightController:
                                                        5.0 * min(1.0, max(height, 0.0) / 40.0))
         throttle = float(np.clip(np.linalg.norm(acceleration) * state.mass_kg / state.thrust_n, 0.0, 1.0))
         self.last_desired_direction = direction.copy()
-        return Command(throttle=throttle, direction=direction, engine=True, fins=True, legs=True)
+        return Command(throttle=throttle, direction=direction, engine=True, fins=True, legs=deploy_legs)
