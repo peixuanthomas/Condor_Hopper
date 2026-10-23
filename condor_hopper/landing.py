@@ -7,6 +7,9 @@ import cvxpy as cp
 import numpy as np
 
 
+LANDING_DISTANCE_TOLERANCE_M = 20.0
+
+
 @dataclass
 class LandingState:
     ut: float
@@ -38,6 +41,15 @@ class LandingPlan:
     fuel_kg: float
     slack_ms2: float
     rollout_error_m: float
+
+    def at(self, ut):
+        elapsed = ut - self.ignition_ut
+        midpoints = 0.5 * (self.times[:-1] + self.times[1:])
+        result = []
+        for values in (self.position, self.velocity, self.acceleration, self.external):
+            nodes = self.times if len(values) == len(self.times) else midpoints
+            result.append(np.array([np.interp(elapsed, nodes, values[:, axis]) for axis in range(3)]))
+        return result
 
 
 def air_normal(state, speed):
@@ -83,10 +95,18 @@ def steering_force(desired, velocity, axial, normal, reference, tilt_degrees=20.
     return magnitude * direction, direction
 
 
-def fin_target(height, velocity, error, aero, gravity, normal):
-    effective_gravity = max(2.0, gravity - aero[0])
-    horizon = max(2.0, (velocity[0] + math.sqrt(velocity[0]**2 + 2 * effective_gravity * height)) / effective_gravity)
-    desired = 6.0 * error / horizon**2 - 4.0 * velocity[1:] / horizon
+def fin_target(height, velocity, error, aero, gravity, normal, plan=None, ut=0.0):
+    if plan is None:
+        effective_gravity = max(2.0, gravity - aero[0])
+        horizon = max(2.0, (velocity[0] + math.sqrt(velocity[0]**2 + 2 * effective_gravity * height)) / effective_gravity)
+        final_velocity = np.zeros(2)
+    else:
+        horizon = plan.ignition_ut - ut
+        if horizon <= 4.0:
+            return plan.acceleration[0] / np.linalg.norm(plan.acceleration[0])
+        error = np.asarray(error) + plan.position[0, 1:]
+        final_velocity = plan.velocity[0, 1:]
+    desired = 6.0 * error / horizon**2 - (4.0 * velocity[1:] + 2.0 * final_velocity) / horizon
     drag = max(0.0, -np.dot(aero, velocity) / max(np.dot(velocity, velocity), 1.0))
     slope = (desired + (drag + normal) * velocity[1:]) / (normal * min(velocity[0], -20.0))
     retro_slope = -velocity[1:] / max(-velocity[0] + 1.0, 1.0)
@@ -126,16 +146,35 @@ def shifted(state, ut, position, velocity, mass=None):
                         state.aero_speed)
 
 
+def coast_step(state, duration, plan=None, target_direction=None):
+    if target_direction is None:
+        gravity_rotation = external_acceleration(state.position, state.velocity, replace(state, drag=0.0, normal=0.0))
+        air = external_acceleration(state.position, state.velocity, state) - gravity_rotation
+        normal = max(0.002, air_normal(state, np.linalg.norm(state.velocity)))
+        target_direction = fin_target(state.position[0], state.velocity, -state.position[1:], air,
+                                      state.gravity, normal, plan, state.ut)
+    angle = math.acos(float(np.clip(np.dot(state.direction, target_direction), -1.0, 1.0)))
+    fraction = min(1.0, math.radians(2.5) * duration / max(angle, 1e-9))
+    direction = (1.0 - fraction) * state.direction + fraction * target_direction
+    direction /= np.linalg.norm(direction)
+    segment = replace(state, direction=(state.direction + direction) / np.linalg.norm(state.direction + direction))
+    position, velocity = propagate(segment, duration)
+    result = shifted(state, state.ut + duration, position, velocity)
+    result.direction = direction
+    return result
+
+
 def stopping_burn(state):
-    state = replace(state, drag=0.0, normal=0.0)
-    height, speed, mass, elapsed, distance = state.position[0], state.velocity[0], state.mass, 0.0, 0.0
+    height, speed, mass = float(state.position[0]), float(state.velocity[0]), float(state.mass)
+    elapsed, distance = 0.0, 0.0
+    gravity_radius = float(state.gravity * (state.radius + height)**2)
+    rotation_squared = float(state.rotation[1]**2)
+    thrust = float(0.90 * state.thrust)
     while speed < -0.7 and elapsed < 90.0:
         dt = 0.05
-        position = np.array([height, 0.0, 0.0])
-        velocity = np.array([speed, 0.0, 0.0])
         # 点火距离不依赖空气额外制动，并保留油门余量。
-        thrust = 0.90 * state.thrust
-        accel = thrust / mass + external_acceleration(position, velocity, state)[0]
+        gravity = gravity_radius / (state.radius + height)**2
+        accel = thrust / mass - gravity + (state.radius + height) * rotation_squared
         travel = speed * dt + 0.5 * accel * dt**2
         height += travel
         distance -= travel
@@ -152,6 +191,7 @@ class LandingSolver:
 
     def __init__(self, nodes=40):
         self.nodes = nodes
+        self.capture_radius_m = 0.5 * LANDING_DISTANCE_TOLERANCE_M
         n = nodes
         self.r = cp.Variable((n + 1, 3))
         self.v = cp.Variable((n + 1, 3))
@@ -175,11 +215,13 @@ class LandingSolver:
         self.upper, self.upper_z = cp.Parameter(n), cp.Parameter(n, nonneg=True)
         self.minimum_mass = cp.Parameter()
         self.minimum_acceleration = cp.Parameter(nonneg=True)
+        self.braking = cp.Parameter(n + 1, nonneg=True)
         self.initial_slope = cp.Parameter(2)
         self.turn_step = cp.Parameter(nonneg=True)
         self.turn_acceleration_step = cp.Parameter(nonneg=True)
         constraints = [self.r[0] == self.r0, self.v[0] == self.v0, self.z[0] == 0,
-                       self.r[-1] == 0, self.v[-1] == [-0.7, 0.0, 0.0],
+                       self.r[-1, 0] == 0, cp.norm(self.r[-1, 1:]) <= self.capture_radius_m,
+                       self.v[-1] == [-0.7, 0.0, 0.0],
                        self.r[:, 0] >= 0, self.v[:, 0] <= -0.04 * self.r[:, 0] - 0.7, self.z >= self.minimum_mass,
                        self.v[1:, 0] >= self.v[:-1, 0],
                        self.r[1:] == self.r[:-1] + 0.5 * self.dt * (self.v[:-1] + self.v[1:]) + self.position_bias,
@@ -188,9 +230,11 @@ class LandingSolver:
                        self.sigma <= self.upper - cp.multiply(self.upper_z, self.z[:-1]),
                        self.u[:, 0] >= math.cos(math.radians(20.0)) * self.sigma,
                        self.u[:, 0] >= self.minimum_acceleration]
+        constraints += [cp.square(self.v[:, 0] / 100.0)
+                        <= (0.7**2 + 2.0 * cp.multiply(self.braking, self.r[:, 0]) + 1.0) / 10000.0]
         constraints += [cp.norm(self.u - self.reference_thrust, axis=1) <= 25.0,
                         cp.abs(self.u[:, 0] - self.reference_thrust[:, 0]) <= self.thrust_trust,
-                        cp.norm(self.r[:, 1:], axis=1) <= math.tan(math.radians(20.0)) * self.r[:, 0] + 1.0,
+                        cp.norm(self.r[:, 1:], axis=1) <= math.tan(math.radians(20.0)) * self.r[:, 0] + self.capture_radius_m,
                         cp.norm(self.v[:, 1:], axis=1) <= 0.025 * self.r[:, 0] + 0.5,
                         cp.norm(self.r[:, 1:] + cp.multiply(0.5 * self.capture_time[:, None], self.v[:, 1:]), axis=1)
                         <= self.capture_radius]
@@ -206,16 +250,14 @@ class LandingSolver:
         constraints += [cp.norm(slopes[k] - 2 * slopes[k - 1] + slopes[k - 2]) <= self.turn_acceleration_step
                         for k in range(2, n)]
         for k in range(n * 3 // 4, n):
-            constraints += [cp.norm(self.r[k, 1:]) <= 0.05 * self.r[k, 0] + 1.0,
-                            cp.norm(self.r[k, 1:] + 0.5 * (n - k) * self.dt * self.v[k, 1:]) <= 1.0,
+            constraints += [cp.norm(self.r[k, 1:]) <= 0.05 * self.r[k, 0] + self.capture_radius_m,
+                            cp.norm(self.r[k, 1:] + 0.5 * (n - k) * self.dt * self.v[k, 1:]) <= self.capture_radius_m,
                             cp.norm(self.u[k, 1:]) <= math.tan(math.radians(5.0)) * self.u[k, 0]]
         self.problem = cp.Problem(cp.Minimize(cp.sum(self.sigma) + 10000.0 * cp.norm1(self.virtual)), constraints)
 
     def solve(self, state, duration):
         if duration < 0.5 or duration > 45.0 or state.position[0] <= 0.0:
             return None
-        # 点火后必须由发动机完成制导，不能把预计的空气作用当成可控推力。
-        state = replace(state, drag=0.0, normal=0.0)
         n, dt = self.nodes, duration / self.nodes
         times = np.linspace(0.0, duration, n + 1)
         rref = np.linspace(state.position, np.zeros(3), n + 1)
@@ -232,6 +274,12 @@ class LandingSolver:
         self.turn_step.value = math.radians(3.0) * dt
         self.turn_acceleration_step.value = 0.03 * dt**2
         for _ in range(12):
+            braking = []
+            for k in range(n + 1):
+                model = shifted(state, state.ut, rref[k], vref[k], state.mass * math.exp(zref[k]))
+                distance, _ = stopping_burn(model)
+                braking.append(max(0.1, (vref[k, 0]**2 - 0.7**2) / max(2.0 * distance, 0.01)))
+            self.braking.value = braking
             external = []
             biases = []
             position_biases = []
@@ -265,7 +313,7 @@ class LandingSolver:
             self.position_bias.value = np.array(position_biases)
             self.reference_thrust.value = uref
             self.capture_time.value = 2.0 * np.maximum(rref[:, 0], 0.0) / np.maximum(-vref[:, 0] + 0.7, 1.0)
-            self.capture_radius.value = 0.5 + 0.1 * np.maximum(rref[:, 0] - 250.0, 0.0)
+            self.capture_radius.value = self.capture_radius_m + 0.1 * np.maximum(rref[:, 0] - 250.0, 0.0)
             self.thrust_trust.value = np.maximum(3.0, 0.5 * upref)
             self.ratio_offset.value = uref[:, 1:] / upref[:, None]
             for k in range(n):
@@ -292,7 +340,7 @@ class LandingSolver:
                 segment = shifted(state, state.ut + (k + 0.5) * dt, position, velocity,
                                   state.mass * math.exp(0.5 * (zref[k] + zref[k + 1])))
                 position, velocity = propagate(segment, dt / 2, acceleration[k], final_acceleration=ending)
-            error = float(np.linalg.norm(position))
+            error = float(np.linalg.norm(position - rref[-1]))
             slack = float(np.max(np.abs(self.sigma.value - np.linalg.norm(acceleration, axis=1))))
             mass = state.mass * np.exp(zref)
             actual_thrust = np.linalg.norm(acceleration, axis=1) * mass[:-1]
@@ -305,7 +353,7 @@ class LandingSolver:
             virtual = np.max(np.linalg.norm(self.virtual.value, axis=1)) / dt
             if (error < 2.0 and np.linalg.norm(velocity - [-0.7, 0, 0]) < 0.5 and slack < 0.01 and virtual < 0.001
                     and np.max(actual_thrust) <= state.thrust and mass[-1] >= state.dry_mass
-                    and slew < math.radians(3.5) and turn_accel < 0.04 and capture_error < 0.8):
+                    and slew < math.radians(3.5) and turn_accel < 0.04 and capture_error < self.capture_radius_m + 0.1):
                 external = []
                 for k in range(n):
                     model = shifted(state, state.ut, state.position, state.velocity,
@@ -316,49 +364,48 @@ class LandingSolver:
                                    acceleration, mass, np.array(external), float(state.mass - mass[-1]), slack, error)
         return None
 
-    def plan_ignition(self, state):
+    def plan_burn(self, state):
+        stopping_distance, _ = stopping_burn(state)
+        if state.position[0] < stopping_distance:
+            return None
+        nominal_time = 2.0 * state.position[0] / max(-state.velocity[0], 1.0)
+        candidates = []
+        for factor in (1.0, 1.15, 1.35):
+            plan = self.solve(state, nominal_time * factor)
+            if plan is not None:
+                candidates.append(plan)
+        return min(candidates, key=lambda plan: plan.fuel_kg) if candidates else None
+
+    def plan_ignition(self, state, reference_plan=None):
+        stopping_distance, _ = stopping_burn(state)
+        if state.position[0] < stopping_distance:
+            return None
         coast, current = 0.0, state
         coast_states = [state]
         while coast < 120.0:
             stopping_distance, _ = stopping_burn(current)
             if current.position[0] <= stopping_distance + max(20.0, -0.5 * current.velocity[0]):
                 break
-            gravity_rotation = external_acceleration(current.position, current.velocity, replace(current, drag=0.0, normal=0.0))
-            air = external_acceleration(current.position, current.velocity, current) - gravity_rotation
-            speed = np.linalg.norm(current.velocity)
-            normal = max(0.002, air_normal(current, speed))
-            requested = fin_target(current.position[0], current.velocity, -current.position[1:], air,
-                                   current.gravity, normal)
-            angle = math.acos(float(np.clip(np.dot(current.direction, requested), -1.0, 1.0)))
-            fraction = min(1.0, math.radians(2.5) * 0.5 / max(angle, 1e-9))
-            direction = (1.0 - fraction) * current.direction + fraction * requested
-            direction /= np.linalg.norm(direction)
-            segment = replace(current, direction=(current.direction + direction) / np.linalg.norm(current.direction + direction))
-            position, velocity = propagate(segment, 0.5, vertical_air=False)
+            current = coast_step(current, 0.5, reference_plan)
             coast += 0.5
-            current = shifted(state, state.ut + coast, position, velocity)
-            current.direction = direction
             coast_states.append(current)
         delays = {max(0.0, coast - offset) for offset in (0.0, 2.0, 5.0, 10.0)}
         delays.add(min(coast, 4.0))
         for delay in sorted(delays, reverse=True):
-            candidates = []
             start = coast_states[round(max(0.0, delay - 4.0) / 0.5)]
             while start.ut < state.ut + delay - 1e-6:
                 dt = min(0.5, state.ut + delay - start.ut)
-                angle = math.acos(float(np.clip(start.direction[0], -1.0, 1.0)))
-                fraction = min(1.0, math.radians(2.5) * dt / max(angle, 1e-9))
-                direction = (1.0 - fraction) * start.direction + fraction * np.array([1.0, 0.0, 0.0])
-                direction /= np.linalg.norm(direction)
-                segment = replace(start, direction=(start.direction + direction) / np.linalg.norm(start.direction + direction))
-                position, velocity = propagate(segment, dt, vertical_air=False)
-                start = shifted(state, start.ut + dt, position, velocity)
-                start.direction = direction
-            nominal_time = 2.0 * start.position[0] / max(-start.velocity[0], 1.0)
-            for factor in (1.0, 1.15, 1.35):
-                plan = self.solve(start, nominal_time * factor)
-                if plan is not None:
-                    candidates.append(plan)
-            if candidates:
-                return min(candidates, key=lambda plan: plan.fuel_kg)
+                start = coast_step(start, dt, target_direction=np.array([1.0, 0.0, 0.0]))
+            plan = self.plan_burn(start)
+            for _ in range(3):
+                if plan is None:
+                    break
+                arrival = state
+                while arrival.ut < plan.ignition_ut - 1e-6:
+                    arrival = coast_step(arrival, min(0.5, plan.ignition_ut - arrival.ut), plan)
+                position_error = np.linalg.norm(arrival.position - plan.position[0])
+                velocity_error = np.linalg.norm(arrival.velocity - plan.velocity[0])
+                if position_error < 5.0 and velocity_error < 1.0:
+                    return plan
+                plan = self.plan_burn(arrival)
         return None

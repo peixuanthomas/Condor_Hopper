@@ -83,6 +83,7 @@ def fly(vehicle, target_altitude):
                     slack_ms2=plan.slack_ms2, rollout_error_m=plan.rollout_error_m))
                 saved_plan = controller.plan_number
             tilt = math.degrees(math.acos(float(np.clip(state.direction[0], -1.0, 1.0))))
+            reference = controller.plan.at(state.ut) if controller.phase == "landing" and controller.plan else None
             logger.row(dict(ut=state.ut, elapsed_s=tick - started, phase=controller.phase,
                        altitude_m=state.altitude_m, height_m=state.height_m, target_height_m=state.landing_height_m,
                        surface_altitude_m=vehicle.flight.surface_altitude,
@@ -108,6 +109,10 @@ def fly(vehicle, target_altitude):
                        measured_north_acceleration_ms2=controller.horizontal_acceleration[0],
                        measured_east_acceleration_ms2=controller.horizontal_acceleration[1],
                        horizontal_braking=controller.horizontal_braking or controller.terminal_acceleration is not None,
+                       reference_height_m=reference[0][0] if reference is not None else None,
+                       reference_vertical_speed_ms=reference[1][0] if reference is not None else None,
+                       reference_position_error_m=float(np.linalg.norm(reference[0] - np.array([
+                           state.landing_height_m, *(-state.error)]))) if reference is not None else None,
                        plan_number=controller.plan_number, touchdown_ut=controller.touchdown_ut,
                        planned_ignition_ut=controller.plan.ignition_ut if controller.plan else None,
                        predicted_burn_fuel_kg=controller.plan.fuel_kg if controller.plan else None,

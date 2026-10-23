@@ -6,11 +6,10 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from .landing import LandingSolver, LandingState, external_acceleration, steering_force, fin_target
+from .landing import LANDING_DISTANCE_TOLERANCE_M, LandingSolver, LandingState, steering_force, fin_target, external_acceleration
 
 
 DEFAULT_CUTOFF_ALTITUDE_M = 10000.0
-LANDING_DISTANCE_TOLERANCE_M = 20.0
 
 
 def unit(vector):
@@ -88,14 +87,14 @@ class FlightController:
         self.solver = LandingSolver()
         self.worker = ThreadPoolExecutor(max_workers=1)
         self.pending = None
+        self.pending_phase = "descent"
         self.plan = None
         self.plan_number = 0
         self.last_plan_ut = -math.inf
         self.touchdown_ut = None
         self.ignition_ut = None
         self.terminal_acceleration = None
-        self.normal_coefficient = 0.025
-        self.identified_normal = self.normal_coefficient
+        self.identified_normal = 0.025
         self.capture_missed = False
         self.last_desired_direction = np.array([1.0, 0.0, 0.0])
         self.previous_velocity = None
@@ -125,29 +124,36 @@ class FlightController:
         if self.pending is not None and self.pending.done():
             result = self.pending.result()
             self.pending = None
-            valid = result is not None and result.touchdown_ut > state.ut and result.ignition_ut > state.ut - 0.5
-            if valid and self.plan is not None:
-                valid = result.ignition_ut <= self.plan.ignition_ut + 0.01
+            valid = result is not None and result.touchdown_ut > state.ut and self.pending_phase == self.phase
+            if valid and self.phase == "descent":
+                valid = result.ignition_ut > state.ut - 0.5
+                if self.plan is not None:
+                    valid = valid and result.ignition_ut <= self.plan.ignition_ut + 0.01
             if valid:
                 self.plan = result
                 self.plan_number += 1
-        if self.pending is None and state.ut - self.last_plan_ut >= 1.0 and state.landing_height_m > 200.0:
+                if self.phase == "landing":
+                    self.touchdown_ut = result.touchdown_ut
+        if self.pending is not None or state.ut - self.last_plan_ut < 1.0 or state.landing_height_m <= 200.0:
+            return
+        if self.phase == "landing":
+            if self.plan is None or self.horizontal_braking or self.terminal_acceleration is not None:
+                return
+            position, velocity, _, _ = self.plan.at(state.ut)
+            error = position - np.array([state.landing_height_m, *(-state.error)])
+            if np.linalg.norm(error) <= 20.0 and np.linalg.norm(velocity - state.velocity) <= 5.0:
+                return
+            self.pending = self.worker.submit(self.solver.plan_burn, self.landing_state(state))
+        else:
             initial = self.landing_state(state)
-            self.pending = self.worker.submit(self.solver.plan_ignition, initial)
-            self.last_plan_ut = state.ut
+            self.pending = self.worker.submit(self.solver.plan_ignition, initial, self.plan)
+        self.pending_phase = self.phase
+        self.last_plan_ut = state.ut
 
     def fin_direction(self, state):
-        velocity = state.velocity
-        speed = np.linalg.norm(velocity)
-        normal = velocity - np.dot(velocity, state.direction) * state.direction
-        if speed > 80 and np.linalg.norm(normal) > 5.0:
-            axis_speed = np.dot(velocity, state.direction)
-            axial_drag = max(0.0, -np.dot(state.aero, state.direction) / axis_speed)
-            estimate = -np.dot(state.aero + axial_drag * velocity, normal) / np.dot(normal, normal)
-            if 0.002 < estimate < 1.0:
-                self.normal_coefficient = 0.98 * self.normal_coefficient + 0.02 * estimate
-        return fin_target(state.landing_height_m, velocity, state.error, state.aero,
-                          state.gravity, self.normal_coefficient)
+        model = self.landing_state(state)
+        return fin_target(state.landing_height_m, state.velocity, state.error, state.aero,
+                          state.gravity, max(0.002, model.normal), self.plan, state.ut)
 
     def update(self, state: Sample) -> Command:
         elapsed = 0.05 if not hasattr(self, "previous_ut") else state.ut - self.previous_ut
@@ -188,8 +194,6 @@ class FlightController:
                 if self.plan is None and state.landing_height_m < 600.0 and state.direction[0] > 0.7:
                     raise RuntimeError("未找到能在剩余燃料内到达指定着陆点的轨迹")
                 direction = self.fin_direction(state)
-                if self.plan is not None and self.plan.ignition_ut - state.ut < 4.0:
-                    direction = unit(self.plan.acceleration[0])
                 return Command(direction=direction, fins=True, legs=deploy_legs)
 
         if self.phase == "landing" and state.grounded >= 1:
@@ -215,30 +219,23 @@ class FlightController:
         if state.direction[0] < math.cos(math.radians(45.0)):
             return Command(fins=True, legs=deploy_legs)
 
+        self.update_plan(state)
         if (state.landing_height_m > 200.0 and self.terminal_acceleration is None
                 and self.plan is not None):
-            feedforward = self.last_desired_direction
             actual_position = np.array([state.landing_height_m, *(-state.error)])
+            position, velocity, thrust, external = self.plan.at(state.ut)
             model = self.landing_state(state)
-            gravity_rotation = external_acceleration(actual_position, state.velocity, replace(model, drag=0.0, normal=0.0))
-            braking = max(0.0, (state.velocity[0]**2 - 0.7**2) / (2.0 * state.landing_height_m))
-            desired = np.array([state.gravity + braking, 0.0, 0.0])
-            remaining = max(1.0, 2.0 * state.landing_height_m / max(-state.velocity[0] + 0.7, 1.0))
-            horizontal = -12.0 * actual_position[1:] / remaining**2 - 6.0 * state.velocity[1:] / remaining
-            if state.landing_height_m < 1000.0:
-                turn_seconds = math.degrees(math.acos(float(np.clip(state.direction[0], -1.0, 1.0)))) / 4.0 + 2.0
-                # 转正需要时间；预计横移会先反向时，必须提前停止追点。
-                predicted_velocity = state.velocity[1:] + turn_seconds * self.horizontal_acceleration
-                if np.dot(state.velocity[1:], predicted_velocity) <= 0.0:
-                    self.horizontal_braking = True
-                # 末段给转向留一秒，不能等水平速度归零后才开始收掉倾角。
-                horizontal = (self.horizontal_acceleration - 60.0 * actual_position[1:] / remaining**3
-                              -36.0 * state.velocity[1:] / remaining**2 - 9.0 * self.horizontal_acceleration / remaining)
-            desired[1:] = horizontal - gravity_rotation[1:]
+            horizon = max(3.0, min(8.0, self.plan.touchdown_ut - state.ut))
+            gravity_rotation = external_acceleration(model.position, model.velocity, replace(model, drag=0.0, normal=0.0))
+            desired = thrust + external - gravity_rotation
+            desired += 6.0 * (position - actual_position) / horizon**2 + 4.0 * (velocity - state.velocity) / horizon
+            braking = (state.velocity[0]**2 - 0.7**2) / max(2.0 * state.height_m, 1.0)
+            desired[0] = max(desired[0], state.gravity + braking)
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
-                                                       model.normal, feedforward, brake_horizontal=self.horizontal_braking)
+                                                       model.normal, unit(thrust), brake_horizontal=self.horizontal_braking)
         else:
-            height = min(state.height_m, state.landing_height_m)
+            height = state.height_m
+            self.horizontal_braking = True
             if self.terminal_acceleration is None:
                 self.terminal_acceleration = max(0.5, float((state.velocity[0]**2 - 0.7**2) / max(2 * height, 1.0)))
                 self.capture_missed = bool(np.linalg.norm(state.error) > LANDING_DISTANCE_TOLERANCE_M)

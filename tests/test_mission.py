@@ -3,8 +3,10 @@ import pytest
 from collections import deque
 from types import SimpleNamespace
 from concurrent.futures import Future
+from unittest.mock import Mock
 
 from condor_hopper.mission import FlightController, Sample, descent_attitude, attitude_error, unit
+from condor_hopper.landing import LandingPlan, external_acceleration
 
 
 def sample(**values):
@@ -14,6 +16,20 @@ def sample(**values):
                     gravity=9.81, grounded=0)
     defaults.update(values)
     return Sample(**defaults)
+
+
+def plan_for(state, ignition_ut=0.0, duration=20.0):
+    times = np.linspace(0.0, duration, 41)
+    position = np.array([state.landing_height_m, *(-state.error)])
+    final_velocity = np.array([-0.7, 0.0, 0.0])
+    quadratic = (-3.0 * position - (2.0 * state.velocity + final_velocity) * duration) / duration**2
+    cubic = (2.0 * position + (state.velocity + final_velocity) * duration) / duration**3
+    positions = position + times[:, None] * state.velocity + times[:, None]**2 * quadratic + times[:, None]**3 * cubic
+    velocities = state.velocity + 2.0 * times[:, None] * quadratic + 3.0 * times[:, None]**2 * cubic
+    midpoints = 0.5 * (times[:-1] + times[1:])
+    acceleration = 2.0 * quadratic + 6.0 * midpoints[:, None] * cubic + [state.gravity, 0.0, 0.0]
+    return LandingPlan(ignition_ut, ignition_ut + duration, times, positions, velocities, acceleration,
+                       np.full(41, state.mass_kg), np.tile([-state.gravity, 0.0, 0.0], (40, 1)), 0.0, 0.0, 0.0)
 
 
 def test_ascent_full_throttle_until_sea_level_20000m():
@@ -103,7 +119,7 @@ def test_legs_deploy_at_800m_in_both_descent_phases(phase, height, deployed):
     controller = FlightController()
     controller.phase = phase
     controller.update_plan = lambda state: None
-    controller.plan = SimpleNamespace(ignition_ut=10.0, touchdown_ut=30.0)
+    controller.plan = plan_for(sample(height_m=height, velocity=np.array([-100.0, 0.0, 0.0])), 10.0)
     try:
         command = controller.update(sample(height_m=height + 10.0, target_height_m=height,
                                            velocity=np.array([-100.0, 0.0, 0.0])))
@@ -116,8 +132,7 @@ def test_planned_landing_ignites_above_800m_with_legs_stowed():
     controller = FlightController()
     controller.phase = "descent"
     controller.update_plan = lambda state: None
-    controller.plan = SimpleNamespace(ignition_ut=10.0, touchdown_ut=30.0,
-                                      acceleration=np.array([[1.0, 0.0, 0.0]]))
+    controller.plan = plan_for(sample(height_m=3000.0, velocity=np.array([-300.0, 0.0, 0.0])), 10.0)
     try:
         state = sample(ut=9.9, height_m=3000.0, velocity=np.array([-300.0, 0.0, 0.0]))
         assert not controller.update(state).engine
@@ -151,6 +166,62 @@ def test_replanning_cannot_keep_delaying_an_accepted_ignition():
     controller.update_plan(sample(ut=5.0, height_m=6000.0))
     assert controller.plan is initial
     controller.close()
+
+
+def test_powered_tracking_replans_from_actual_state_without_restarting_ignition():
+    controller = FlightController()
+    controller.phase = "landing"
+    controller.ignition_ut = -3.0
+    state = sample(height_m=2500.0, velocity=np.array([-300.0, 0.0, 0.0]))
+    controller.plan = plan_for(state)
+    future = Future()
+    controller.worker.submit = Mock(return_value=future)
+    try:
+        controller.update_plan(state)
+        controller.worker.submit.assert_not_called()
+        state.error = np.array([30.0, 0.0])
+        controller.update_plan(state)
+        function, actual = controller.worker.submit.call_args.args
+        assert function == controller.solver.plan_burn
+        assert np.allclose(actual.position, [2500.0, -30.0, 0.0])
+        corrected = plan_for(state)
+        future.set_result(corrected)
+        controller.update_plan(state)
+        assert controller.plan is corrected and controller.ignition_ut == -3.0
+        assert controller.touchdown_ut == corrected.touchdown_ut
+    finally:
+        controller.close()
+
+
+def test_pending_coast_plan_cannot_replace_a_burn_already_in_progress():
+    controller = FlightController()
+    controller.phase = "landing"
+    state = sample(height_m=2500.0, velocity=np.array([-300.0, 0.0, 0.0]))
+    active = plan_for(state)
+    controller.plan = active
+    controller.pending_phase = "descent"
+    controller.pending = Future()
+    controller.pending.set_result(plan_for(state, ignition_ut=5.0))
+    try:
+        controller.update_plan(state)
+        assert controller.plan is active
+    finally:
+        controller.close()
+
+
+def test_tracking_does_not_count_planet_rotation_twice():
+    controller = FlightController(rotation=[0.0, 0.0003, 0.0])
+    controller.phase = "landing"
+    controller.update_plan = lambda state: None
+    state = sample(height_m=2500.0, velocity=np.array([-300.0, 0.0, 0.0]))
+    controller.plan = plan_for(state)
+    model = controller.landing_state(state)
+    controller.plan.external[:] = external_acceleration(model.position, model.velocity, model)
+    try:
+        command = controller.update(state)
+        assert np.allclose(command.direction, [1.0, 0.0, 0.0])
+    finally:
+        controller.close()
 
 
 def test_fins_aim_to_finish_horizontal_return_before_powered_touchdown():
@@ -239,6 +310,17 @@ def test_terminal_command_does_not_accelerate_up_through_touchdown():
     controller.close()
 
 
+def test_terminal_braking_uses_the_ground_below_the_vehicle():
+    controller = FlightController()
+    controller.phase = "landing"
+    state = sample(height_m=100.0, target_height_m=94.0, velocity=np.array([-50.0, 0.0, 0.0]))
+    try:
+        controller.update(state)
+        assert controller.terminal_acceleration == pytest.approx((50.0**2 - 0.7**2) / 200.0)
+    finally:
+        controller.close()
+
+
 def test_terminal_keeps_braking_horizontal_speed_until_contact():
     for height in (200.0, 20.0, 5.0, 0.0, -5.0):
         controller = FlightController()
@@ -260,13 +342,15 @@ def test_powered_descent_can_correct_a_25ms_entry_speed_error():
     controller = FlightController()
     controller.phase = "landing"
     controller.touchdown_ut = 20.0
-    controller.plan = object()
     controller.update_plan = lambda state: None
-    state = sample(height_m=2500.0, velocity=np.array([-375.0, 0.0, 0.0]), aero=np.array([10.0, 0.0, 0.0]),
+    state = sample(height_m=2500.0, velocity=np.array([-350.0, 0.0, 0.0]), aero=np.array([10.0, 0.0, 0.0]),
                    mass_kg=40000.0, thrust_n=1800000.0)
-    command = controller.update(state)
-    net_braking = command.throttle * state.thrust_n / state.mass_kg + state.aero[0] - state.gravity
-    assert net_braking == pytest.approx((375.0**2 - 0.7**2) / (2.0 * 2500.0))
+    controller.plan = plan_for(state)
+    nominal = controller.update(state)
+    state.velocity = np.array([-375.0, 0.0, 0.0])
+    correction = controller.update(state)
+    assert correction.throttle > nominal.throttle
+    assert np.allclose(correction.direction, [1.0, 0.0, 0.0])
     controller.close()
 
 
