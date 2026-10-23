@@ -20,7 +20,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="condor-hopper", description="Condor Hopper 垂直起飞与定点着陆，默认海拔 20000 米熄火")
+    parser = argparse.ArgumentParser(prog="condor-hopper", description=f"Condor Hopper 垂直起飞与定点着陆，默认海拔 {DEFAULT_CUTOFF_ALTITUDE_M:g} 米熄火")
     commands = parser.add_subparsers(dest="command", title="命令")
     for name, description in (("probe", "检查载具状态，不点火"), ("fly", "起飞并执行完整着陆流程")):
         command = commands.add_parser(name, help=description, description=description)

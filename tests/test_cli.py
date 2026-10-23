@@ -19,19 +19,19 @@ def runtime(monkeypatch):
 
 
 @pytest.mark.parametrize("status", [0, 2])
-def test_fly_runs_default_20000m_without_an_execute_flag(runtime, status):
+def test_fly_runs_default_10000m_without_an_execute_flag(runtime, status):
     runtime.fly.return_value = status
     assert cli.main(["fly"]) == status
-    runtime.fly.assert_called_once_with(runtime.vehicle, 20000.0)
+    runtime.fly.assert_called_once_with(runtime.vehicle, 10000.0)
     runtime.connect.assert_called_once_with(name="Condor Hopper", address="127.0.0.1",
         rpc_port=50000, stream_port=50001, use_pregenerated_stubs=False)
     runtime.connection.close.assert_called_once()
 
 
 def test_fly_accepts_custom_altitude_and_connection(runtime):
-    assert cli.main(["fly", "--target-altitude", "10000", "--address", "192.0.2.1",
+    assert cli.main(["fly", "--target-altitude", "20000", "--address", "192.0.2.1",
                      "--rpc-port", "51000", "--stream-port", "51001"]) == 0
-    runtime.fly.assert_called_once_with(runtime.vehicle, 10000.0)
+    runtime.fly.assert_called_once_with(runtime.vehicle, 20000.0)
     assert runtime.connect.call_args.kwargs["address"] == "192.0.2.1"
     assert runtime.connect.call_args.kwargs["rpc_port"] == 51000
     assert runtime.connect.call_args.kwargs["stream_port"] == 51001

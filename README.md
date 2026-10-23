@@ -1,6 +1,6 @@
 # Condor Hopper
 
-通过 Python 和 kRPC 控制 KSP 中的 `Condor-Hopper`：默认全油门竖直上升至**海拔 20000 米**后熄火，保持姿态滑行，下降后用栅格舵修正落点，再重新点火减速着陆。
+通过 Python 和 kRPC 控制 KSP 中的 `Condor-Hopper`：默认全油门竖直上升至**海拔 10000 米**后熄火，保持姿态滑行，下降后用栅格舵修正落点，再重新点火减速着陆。
 
 着陆目标为**南纬 0°12′21″、西经 74°28′23″**（`-0.20583333, -74.47305556`），距发射台约 1442 米。程序从游戏读取目标地面海拔，落点允许误差为 **20 米**。
 
@@ -21,17 +21,17 @@ python -m pip install -e .
 ```powershell
 condor-hopper probe
 condor-hopper fly
-condor-hopper fly --target-altitude 10000
+condor-hopper fly --target-altitude 20000
 condor-hopper --help
 ```
 
-`probe` 只检查状态，输出载具、燃料、目标坐标和距离。`fly` 直接执行一次完整飞行，默认海拔 **20000 米**熄火，无需 `--execute`；`--target-altitude` 可指定其他熄火海拔。直接输入 `condor-hopper` 或使用 `--help` 查看命令说明。
+`probe` 只检查状态，输出载具、燃料、目标坐标和距离。`fly` 直接执行一次完整飞行，默认海拔 **10000 米**熄火，无需 `--execute`；`--target-altitude` 可指定其他熄火海拔。直接输入 `condor-hopper` 或使用 `--help` 查看命令说明。
 
 仍可在项目目录使用 `python main.py probe` 和 `python main.py fly`。
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
-| `--target-altitude` | `20000` | 发动机熄火的海拔，单位米；只用于 `fly` |
+| `--target-altitude` | `10000` | 发动机熄火的海拔，单位米；只用于 `fly` |
 | `--address` | `127.0.0.1` | kRPC 服务器地址 |
 | `--rpc-port` | `50000` | 控制连接端口 |
 | `--stream-port` | `50001` | 飞行数据端口 |

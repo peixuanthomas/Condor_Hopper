@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "condor-hopper"
 version = "0.2.0"
-description = "20000 m vertical KSP hop and convex landing at a fixed site through kRPC"
+description = "10000 m vertical KSP hop and convex landing at a fixed site through kRPC"
 requires-python = ">=3.11"
 dependencies = ["krpc>=0.5.4", "numpy>=2.0", "cvxpy>=1.6", "clarabel>=0.10"]
 
