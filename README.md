@@ -98,6 +98,6 @@ python -m pytest
 - [landing.py](condor_hopper/landing.py)：点火时机、轨迹计算和运动检查。
 - [CHANGELOG.md](CHANGELOG.md)：改动记录。
 
-本机 kRPC 0.5.2 的舵面转动力带有正负号；Python 按各部件转动力的幅值计算，避免相加时抵消。上升和滑行仍使用原有自动驾驶，下降不依赖服务端自动驾驶的转向计算。
+本机 kRPC 0.5.2 的舵面转动力带有正负号；Python 按各部件转动力的幅值计算，避免相加时抵消。姿态控制按当前读出的转向能力计算操纵量，避免低估栅格舵作用后输入过大、来回摆动。上升和滑行仍使用原有自动驾驶，下降不依赖服务端自动驾驶的转向计算。
 
 kRPC 参考：[飞行数据](https://krpc.github.io/krpc/latest/python/api/space-center/flight.html)、[自动驾驶](https://krpc.github.io/krpc/latest/python/api/space-center/auto-pilot.html)、[部件](https://krpc.github.io/krpc/latest/python/api/space-center/parts.html)。

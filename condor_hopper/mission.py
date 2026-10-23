@@ -30,13 +30,13 @@ def attitude_error(target_local):
 
 def descent_attitude(target_local, angular_rate, angular_accel, bias=None, reference_rate=None, max_rate=0.05):
     error = attitude_error(target_local)
-    angular_accel = np.clip(np.asarray(angular_accel), 0.02, 0.12)
+    angular_accel = np.maximum(np.asarray(angular_accel), 0.02)
     target_rate = 0.8 * error
     if reference_rate is not None:
         target_rate += np.clip(reference_rate, -max_rate, max_rate)
     target_rate = np.clip(target_rate, -max_rate, max_rate)
     target_rate[1] = 0.0
-    command = 2.5 * (target_rate - angular_rate) / angular_accel
+    command = 4.0 * (target_rate - angular_rate) / angular_accel
     return np.clip(command + (np.zeros(3) if bias is None else bias), -1.0, 1.0)
 
 

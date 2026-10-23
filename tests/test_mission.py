@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from collections import deque
 from types import SimpleNamespace
 from concurrent.futures import Future
 
@@ -57,6 +58,25 @@ def test_descent_attitude_converges_in_both_pitch_directions():
             angle += rate * 0.02
         assert abs(angle) < np.radians(0.2)
         assert abs(rate) < 0.001
+
+
+@pytest.mark.parametrize("authority", [0.08, 0.53])
+def test_attitude_settles_with_measured_fin_authority_and_control_delay(authority):
+    angle, rate = 0.15, 0.0
+    inputs = deque([0.0] * 10)
+    recent_angles, recent_rates = [], []
+    for step in range(1000):
+        target = [0.0, np.cos(angle), np.sin(angle)]
+        command = descent_attitude(target, np.array([rate, 0.0, 0.0]), [authority] * 3,
+                                   max_rate=np.radians(5.0))
+        inputs.append(command[0])
+        rate += inputs.popleft() * authority * 0.02
+        angle += rate * 0.02
+        if step >= 750:
+            recent_angles.append(abs(angle))
+            recent_rates.append(abs(rate))
+    assert max(recent_angles) < np.radians(0.2)
+    assert max(recent_rates) < 0.005
 
 
 def test_fins_stowed_through_apogee_then_open_after_descent():
