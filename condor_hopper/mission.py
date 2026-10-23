@@ -9,7 +9,7 @@ import numpy as np
 from .landing import LandingSolver, LandingState, external_acceleration, steering_force, fin_target
 
 
-DEFAULT_CUTOFF_ALTITUDE_M = 20000.0
+DEFAULT_CUTOFF_ALTITUDE_M = 10000.0
 
 
 def unit(vector):
