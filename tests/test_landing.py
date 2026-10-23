@@ -84,6 +84,28 @@ def test_combined_air_and_engine_steering_changes_sign(normal, expected_sign):
     assert np.allclose(force + air, desired)
 
 
+def test_similar_air_and_engine_forces_cancel_velocity_without_chasing_position():
+    velocity = np.array([-300.0, 10.0, -5.0])
+    desired = np.array([35.0, 20.0, -10.0])
+    force, direction = steering_force(desired, velocity, 0.03, 0.1, np.array([1.0, 0.0, 0.0]))
+    assert np.allclose(direction[1:] / direction[0], -velocity[1:] / 320.0)
+    air = -0.03 * velocity - 0.1 * (velocity - np.dot(velocity, direction) * direction)
+    assert np.dot(velocity[1:], (force + air)[1:]) < 0.0
+    assert (force + air)[0] == pytest.approx(desired[0])
+
+
+@pytest.mark.parametrize("normal", [0.0, 0.1, 0.5])
+@pytest.mark.parametrize("vertical_speed", [-150.0, -30.0, -0.7])
+def test_terminal_braking_reduces_horizontal_speed_with_air_or_thrust_dominant(normal, vertical_speed):
+    velocity = np.array([vertical_speed, 5.0, -3.0])
+    force, direction = steering_force([30.0, 0.0, 0.0], velocity, 0.01, normal,
+                                      np.array([1.0, 0.0, 0.0]), brake_horizontal=True)
+    air = -0.01 * velocity - normal * (velocity - np.dot(velocity, direction) * direction)
+    acceleration = force + air
+    assert np.dot(velocity[1:], acceleration[1:]) < 0.0
+    assert acceleration[0] == pytest.approx(30.0)
+
+
 @pytest.mark.parametrize("aero_case", ["drag", "transonic", "normal", "entry_error"])
 def test_closed_loop_lands_without_hover_with_attitude_delay(aero_case):
     transonic_drop = aero_case == "transonic"
@@ -187,5 +209,47 @@ def test_last_kilometre_cancels_horizontal_speed_before_contact(air_scale):
         assert -1.2 < velocity[0] < 0.0
         assert np.degrees(np.arccos(direction[0])) < 3.0
         assert minimum_speed > 3.0
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize("air_scale", [0.8, 1.0, 1.2])
+def test_latest_flight_entry_brakes_before_horizontal_velocity_reverses(air_scale):
+    controller = FlightController()
+    controller.phase = "landing"
+    controller.plan = object()
+    # 20261023_151818_568456 的一千米入口，复现接地前横移反向增大的问题。
+    position = np.array([989.0886, -73.1160, 189.2073])
+    velocity = np.array([-176.0055, -7.3157, 16.8770])
+    direction = unit([0.97447043, 0.12068729, -0.18932018])
+    angle = np.arctan2(direction[1:], direction[0])
+    target, rate = angle.copy(), np.zeros(2)
+    mass, ut, previous_speed = 38122.55, 0.0, None
+    try:
+        while ut < 25.0 and position[0] > 0.0:
+            speed = np.linalg.norm(velocity)
+            density = np.exp((989.0886 - position[0]) / 5500.0) * 38122.55 / mass
+            drag = 0.0326539 * density * speed / 176.9661
+            normal = air_scale * 0.1090533 * density * speed / 176.9661
+            aero = -drag * velocity - normal * (velocity - np.dot(velocity, direction) * direction)
+            command = controller.update(Sample(ut, position[0] + 85.0, position[0], velocity.copy(),
+                -position[1:].copy(), direction, aero, mass, 1782861.125, 9.81, 0))
+            direction, target, angle, rate, angular_accel = attitude_step(command, target, angle, rate)
+            acceleration = command.throttle * 1782861.125 / mass * direction + aero - [9.81, 0.0, 0.0]
+            acceleration[1:] -= 4.0 * angular_accel
+            position += velocity * 0.05 + 0.5 * acceleration * 0.05**2
+            velocity += acceleration * 0.05
+            mass -= command.throttle * 1782861.125 / 3238.0 * 0.05
+            ut += 0.05
+            horizontal_speed = np.linalg.norm(velocity[1:])
+            if position[0] < 200.0:
+                if previous_speed is not None and horizontal_speed > 0.5:
+                    assert horizontal_speed <= previous_speed + 1e-5
+                previous_speed = horizontal_speed
+        assert controller.horizontal_braking
+        assert position[0] <= 0.0
+        assert -1.2 < velocity[0] < 0.0
+        assert np.linalg.norm(velocity[1:]) < 0.5
+        assert np.degrees(np.arccos(direction[0])) < 3.0
     finally:
         controller.close()

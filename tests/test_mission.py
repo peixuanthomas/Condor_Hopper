@@ -208,14 +208,17 @@ def test_terminal_command_does_not_accelerate_up_through_touchdown():
     controller.close()
 
 
-def test_terminal_tilt_shrinks_before_contact():
-    for height in (20.0, 5.0):
+def test_terminal_keeps_braking_horizontal_speed_until_contact():
+    for height in (200.0, 20.0, 5.0, 0.0, -5.0):
         controller = FlightController()
         controller.phase = "landing"
-        command = controller.update(sample(height_m=height, velocity=np.array([-30.0, 5.0, 0.0])))
-        angle = np.degrees(np.arccos(command.direction[0]))
-        assert angle <= 5.0 * height / 40.0 + 1e-6
-        controller.close()
+        try:
+            state = sample(height_m=height, velocity=np.array([-30.0, 5.0, -3.0]))
+            command = controller.update(state)
+            assert np.dot(command.direction[1:], state.velocity[1:]) < 0.0
+            assert np.allclose(command.direction[1:] / command.direction[0], -state.velocity[1:] / 50.0)
+        finally:
+            controller.close()
 
 
 def test_zero_thrust_keeps_a_finite_upright_direction():

@@ -99,6 +99,7 @@ class FlightController:
         self.last_desired_direction = np.array([1.0, 0.0, 0.0])
         self.previous_velocity = None
         self.horizontal_acceleration = np.zeros(2)
+        self.horizontal_braking = False
 
     def close(self):
         self.worker.shutdown(wait=True, cancel_futures=True)
@@ -224,12 +225,17 @@ class FlightController:
             remaining = max(1.0, 2.0 * state.landing_height_m / max(-state.velocity[0] + 0.7, 1.0))
             horizontal = -12.0 * actual_position[1:] / remaining**2 - 6.0 * state.velocity[1:] / remaining
             if state.landing_height_m < 1000.0:
+                turn_seconds = math.degrees(math.acos(float(np.clip(state.direction[0], -1.0, 1.0)))) / 4.0 + 2.0
+                # 转正需要时间；预计横移会先反向时，必须提前停止追点。
+                predicted_velocity = state.velocity[1:] + turn_seconds * self.horizontal_acceleration
+                if np.dot(state.velocity[1:], predicted_velocity) <= 0.0:
+                    self.horizontal_braking = True
                 # 末段给转向留一秒，不能等水平速度归零后才开始收掉倾角。
                 horizontal = (self.horizontal_acceleration - 60.0 * actual_position[1:] / remaining**3
                               -36.0 * state.velocity[1:] / remaining**2 - 9.0 * self.horizontal_acceleration / remaining)
             desired[1:] = horizontal - gravity_rotation[1:]
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
-                                                       model.normal, feedforward)
+                                                       model.normal, feedforward, brake_horizontal=self.horizontal_braking)
         else:
             height = min(state.height_m, state.landing_height_m)
             if self.terminal_acceleration is None:
@@ -241,15 +247,11 @@ class FlightController:
             vertical = max(0.1, state.gravity + target_accel + 1.5 * (target_speed - state.velocity[0]))
             if height < 3.0:
                 vertical = max(0.0, min(vertical, state.gravity + (-0.7 - state.velocity[0]) / dt))
-            remaining = max(0.25, 2 * max(height, 0.0) / max(-state.velocity[0] + 0.7, 1.0))
-            horizon = max(remaining, 1.0)
-            horizontal = (self.horizontal_acceleration - 6.0 * state.velocity[1:] / horizon**2
-                          - 4.0 * self.horizontal_acceleration / horizon)
             model = self.landing_state(state)
-            desired = np.array([vertical, *horizontal])
+            desired = np.array([vertical, 0.0, 0.0])
             acceleration, direction = steering_force(desired, state.velocity, model.drag * model.aero_speed,
                                                        model.normal, np.array([1.0, 0.0, 0.0]),
-                                                       5.0 * min(1.0, max(height, 0.0) / 40.0))
+                                                       brake_horizontal=True)
         throttle = float(np.clip(np.linalg.norm(acceleration) * state.mass_kg / state.thrust_n, 0.0, 1.0))
         self.last_desired_direction = direction.copy()
         return Command(throttle=throttle, direction=direction, engine=True, fins=True, legs=deploy_legs)

@@ -88,6 +88,7 @@ def fly(vehicle, target_altitude):
                        surface_altitude_m=vehicle.flight.surface_altitude,
                        touchdown_com_height_m=vehicle.touchdown_height,
                        vertical_speed_ms=state.velocity[0], north_speed_ms=state.velocity[1], east_speed_ms=state.velocity[2],
+                       horizontal_speed_ms=np.linalg.norm(state.velocity[1:]),
                        target_north_error_m=state.error[0], target_east_error_m=state.error[1],
                        distance_to_target_m=np.linalg.norm(state.error), tilt_deg=tilt,
                        direction_up=state.direction[0], direction_north=state.direction[1], direction_east=state.direction[2],
@@ -106,6 +107,7 @@ def fly(vehicle, target_altitude):
                        aero_up_ms2=state.aero[0], aero_north_ms2=state.aero[1], aero_east_ms2=state.aero[2],
                        measured_north_acceleration_ms2=controller.horizontal_acceleration[0],
                        measured_east_acceleration_ms2=controller.horizontal_acceleration[1],
+                       horizontal_braking=controller.horizontal_braking or controller.terminal_acceleration is not None,
                        plan_number=controller.plan_number, touchdown_ut=controller.touchdown_ut,
                        planned_ignition_ut=controller.plan.ignition_ut if controller.plan else None,
                        predicted_burn_fuel_kg=controller.plan.fuel_kg if controller.plan else None,
@@ -114,6 +116,7 @@ def fly(vehicle, target_altitude):
             if tick - last_print >= 1.0:
                 last_print = tick
                 print(f"{controller.phase:8} alt={state.altitude_m:8.1f}m vz={state.velocity[0]:7.1f}m/s "
+                      f"vh={np.linalg.norm(state.velocity[1:]):6.2f}m/s "
                       f"range={np.linalg.norm(state.error):6.1f}m tilt={tilt:5.1f} thr={command.throttle:.2f}", flush=True)
             time.sleep(max(0.0, 0.05 - (time.monotonic() - tick)))
         summary["success"] = controller.success

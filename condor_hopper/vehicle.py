@@ -171,7 +171,7 @@ class KrpcVehicle:
             self.attitude_bias[:] = 0.0
             if command.engine and self.manual_descent:
                 for fin in self.fins:
-                    fin.pitch_enabled = fin.yaw_enabled = False
+                    fin.pitch_enabled = fin.yaw_enabled = True
                 self.last_torque_update = float("-inf")
         if not command.hold_attitude:
             self.control.throttle = 0.0
@@ -196,8 +196,7 @@ class KrpcVehicle:
                 # 本机服务端的舵面转动力带正负号，先取幅值再相加，避免互相抵消。
                 sources = [self.vessel.available_reaction_wheel_torque, self.vessel.available_rcs_torque,
                            self.vessel.available_engine_torque]
-                if not self.engine_active:
-                    sources += [fin.available_torque for fin in self.fins]
+                sources += [fin.available_torque for fin in self.fins]
                 for positive, negative in sources:
                     torque += np.maximum(np.abs(positive), np.abs(negative))
                 self.angular_accel = torque / np.asarray(self.vessel.moment_of_inertia)

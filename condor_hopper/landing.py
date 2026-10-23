@@ -63,9 +63,15 @@ def external_acceleration(position, velocity, state, thrust=None, vertical_air=T
     return np.array([-gravity, 0.0, 0.0]) + rotation + air
 
 
-def steering_force(desired, velocity, axial, normal, reference, tilt_degrees=20.0):
-    combined = np.asarray(desired) + (axial + normal) * np.asarray(velocity)
-    if abs(combined[0]) < 1.0:
+def steering_force(desired, velocity, axial, normal, reference, tilt_degrees=20.0, brake_horizontal=False):
+    velocity = np.asarray(velocity)
+    combined = np.asarray(desired) + (axial + normal) * velocity
+    thrust = max(0.0, desired[0] + axial * velocity[0])
+    aero = normal * np.linalg.norm(velocity)
+    # 参考 BoosterGuidance：两种侧向作用接近时不追点，近地段始终朝反速度方向刹车。
+    if brake_horizontal or abs(thrust - aero) < 0.3 * max(thrust, aero):
+        slope = -velocity[1:] / max(20.0 - velocity[0], 20.0)
+    elif abs(combined[0]) < 1.0:
         slope = reference[1:] / max(reference[0], 0.1)
     else:
         slope = combined[1:] / combined[0]

@@ -93,7 +93,7 @@ def test_descending_fin_deployment_keeps_measured_sign_and_opens_once():
     assert events == ["Extend Fins"] * 4
 
 
-def test_engine_restart_clears_fin_attitude_bias():
+def test_engine_restart_clears_attitude_bias_and_keeps_fins_active():
     vehicle = KrpcVehicle.__new__(KrpcVehicle)
     vehicle.fins_deployed = vehicle.legs_deployed = vehicle.attitude_active = False
     vehicle.engine_active = False
@@ -104,4 +104,24 @@ def test_engine_restart_clears_fin_attitude_bias():
     vehicle.control = SimpleNamespace(throttle=0.0, rcs=False)
     vehicle.apply(Command(engine=True, hold_attitude=False), None)
     assert np.allclose(vehicle.attitude_bias, 0.0)
-    assert all(not fin.pitch_enabled and not fin.yaw_enabled for fin in vehicle.fins)
+    assert all(fin.pitch_enabled and fin.yaw_enabled for fin in vehicle.fins)
+
+
+def test_powered_descent_includes_fin_torque():
+    vehicle, _, _ = fake_vehicle()
+    vehicle.fins_deployed = vehicle.engine_active = vehicle.manual_descent = True
+    vehicle.attitude_active = False
+    vehicle.fins = [SimpleNamespace(available_torque=([4.0, 0.0, 6.0], [-4.0, 0.0, -6.0]))]
+    vehicle.vessel.available_reaction_wheel_torque = ([0.0] * 3, [0.0] * 3)
+    vehicle.vessel.available_rcs_torque = ([0.0] * 3, [0.0] * 3)
+    vehicle.vessel.available_engine_torque = ([1.0, 0.0, 3.0], [-1.0, 0.0, -3.0])
+    vehicle.vessel.moment_of_inertia = [10.0] * 3
+    vehicle.vessel.reference_frame = object()
+    vehicle.streams['angular_velocity'] = lambda: np.zeros(3)
+    vehicle.control = SimpleNamespace(throttle=0.0, rcs=True)
+    vehicle.last_ut = None
+    vehicle.last_direction = np.array([1.0, 0.0, 0.0])
+    vehicle.last_torque_update = -float('inf')
+    vehicle.attitude_bias = np.zeros(3)
+    vehicle.apply(Command(engine=True), vehicle.read())
+    assert np.allclose(vehicle.angular_accel, [0.5, 0.0, 0.9])
