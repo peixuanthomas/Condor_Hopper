@@ -10,6 +10,7 @@ from .landing import LandingSolver, LandingState, external_acceleration, steerin
 
 
 DEFAULT_CUTOFF_ALTITUDE_M = 10000.0
+LANDING_DISTANCE_TOLERANCE_M = 20.0
 
 
 def unit(vector):
@@ -208,7 +209,7 @@ class FlightController:
                 self.contact_started = state.ut
             elif state.ut - self.contact_started >= 1.0:
                 self.phase = "landed"
-                self.success = bool(np.linalg.norm(state.error) <= 5.0)
+                self.success = bool(np.linalg.norm(state.error) <= LANDING_DISTANCE_TOLERANCE_M)
             return Command(fins=True, legs=True, hold_attitude=False)
 
         if state.direction[0] < math.cos(math.radians(45.0)):
@@ -240,7 +241,7 @@ class FlightController:
             height = min(state.height_m, state.landing_height_m)
             if self.terminal_acceleration is None:
                 self.terminal_acceleration = max(0.5, float((state.velocity[0]**2 - 0.7**2) / max(2 * height, 1.0)))
-                self.capture_missed = bool(np.linalg.norm(state.error) > 5.0)
+                self.capture_missed = bool(np.linalg.norm(state.error) > LANDING_DISTANCE_TOLERANCE_M)
             braking = self.terminal_acceleration
             target_speed = -math.sqrt(0.7**2 + 2 * braking * max(height, 0.0))
             target_accel = braking if height > 0.0 else 0.0

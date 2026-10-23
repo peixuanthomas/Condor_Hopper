@@ -163,13 +163,24 @@ def test_tip_after_contact_aborts_instead_of_waiting_for_stability():
     controller.close()
 
 
-@pytest.mark.parametrize("distance,success", [(4.9, True), (5.1, False)])
-def test_landing_accepts_only_positions_within_five_metres(distance, success):
+@pytest.mark.parametrize("distance,success", [(19.9, True), (20.0, True), (20.1, False)])
+def test_landing_accepts_only_positions_within_twenty_metres(distance, success):
     controller = FlightController()
     controller.phase = "landing"
     for ut in (100.0, 101.1):
         controller.update(sample(ut=ut, grounded=4, error=np.array([distance, 0.0])))
     assert controller.phase == "landed" and controller.success == success
+
+
+@pytest.mark.parametrize("distance,missed", [(19.9, False), (20.0, False), (20.1, True)])
+def test_capture_status_uses_the_same_twenty_metre_tolerance(distance, missed):
+    controller = FlightController()
+    controller.phase = "landing"
+    try:
+        controller.update(sample(height_m=80.0, error=np.array([distance, 0.0])))
+        assert controller.capture_missed == missed
+    finally:
+        controller.close()
 
 
 

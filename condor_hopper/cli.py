@@ -12,7 +12,7 @@ import numpy as np
 
 from condor_hopper.flight_logging import FlightLogger
 from condor_hopper.landing import LandingState
-from condor_hopper.mission import DEFAULT_CUTOFF_ALTITUDE_M, FlightController
+from condor_hopper.mission import DEFAULT_CUTOFF_ALTITUDE_M, LANDING_DISTANCE_TOLERANCE_M, FlightController
 from condor_hopper.vehicle import KrpcVehicle
 
 
@@ -45,7 +45,7 @@ def fly(vehicle, target_altitude):
         logger.json("config.json", dict(cutoff_sea_level_altitude_m=target_altitude,
                     landing_latitude=snapshot["target_latitude"], landing_longitude=snapshot["target_longitude"],
                     landing_surface_altitude_m=snapshot["target_surface_altitude_m"],
-                    control_rate_hz=20, landing_distance_tolerance_m=5.0))
+                    control_rate_hz=20, landing_distance_tolerance_m=LANDING_DISTANCE_TOLERANCE_M))
         initial = vehicle.read()
         controller.solver.solve(LandingState(initial.ut, np.array([1500.0, 0.0, 0.0]),
                                 np.array([-200.0, 0.0, 0.0]), initial.mass_kg,
@@ -121,7 +121,7 @@ def fly(vehicle, target_altitude):
             time.sleep(max(0.0, 0.05 - (time.monotonic() - tick)))
         summary["success"] = controller.success
         if not controller.success:
-            summary["failure_reason"] = "已接地，但距指定着陆点超过 5 米"
+            summary["failure_reason"] = f"已接地，但距指定着陆点超过 {LANDING_DISTANCE_TOLERANCE_M:g} 米"
     except (Exception, KeyboardInterrupt) as exc:
         summary["failure_reason"] = str(exc) or type(exc).__name__
         (logger.directory / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
